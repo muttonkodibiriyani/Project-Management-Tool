@@ -4,13 +4,30 @@ import { ic } from '../core/icons.js';
 import { D, S, allTasks, canSee, mem, pColor, proj, task, visibleProjects } from '../core/store.js';
 import { FT, av, empty, hl, pIcon, pStatus, stIcon } from '../ui/helpers.js';
 
+// A description's text for matching (never rendered): each tag, '<' to the next '>', is dropped, as replace(/<[^>]+>/g, '') did.
+// Written without a regex because CodeQL reads that replace as an incomplete HTML sanitizer.
+const stripTags = html => {
+  let text = '';
+  let from = 0;
+  for (let open = html.indexOf('<'); open !== -1; open = html.indexOf('<', open + 1)) {
+    const close = html.indexOf('>', open + 1);
+    if (close === -1) break;
+    if (close > open + 1) {
+      text += html.slice(from, open);
+      from = close + 1;
+      open = close;
+    }
+  }
+  return text + html.slice(from);
+};
+
 export function searchAll(q) {
   q = (q || '').trim().toLowerCase();
   if (!q) return { tasks: [], projects: [], people: [], files: [], comments: [] };
   const has = s => (s || '').toLowerCase().includes(q);
   return {
     tasks: allTasks()
-      .filter(t => has(t.title) || has(t.key) || has(t.desc.replace(/<[^>]+>/g, '')))
+      .filter(t => has(t.title) || has(t.key) || has(stripTags(t.desc)))
       .slice(0, 30),
     projects: visibleProjects().filter(p => has(p.name) || has(p.desc)),
     people: D().members.filter(m => has(m.name) || has(m.email) || has(m.title)),
