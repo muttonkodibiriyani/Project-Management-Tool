@@ -1,0 +1,358 @@
+# Runs on every pull request, whatever its base, and on every commit to main. Each commit's image is
+# built once, scanned, and checked with the same scripts people run on Windows and Mac. On main, once
+# every job has passed, that image becomes the one tagged main, which the local check runs by default.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run. Commits to main each get their own group, so
+# every one of them is built and checked. Keep cancel-in-progress a plain value: Checkov 3.4 silently
+# skips a workflow where it is an expression.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE: ghcr.io/muttonkodibiriyani/launch-tracker
+  # The commit the image is built from: the pull request's own head, not GitHub's merge preview.
+  COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  lint-test:
+    name: Lint, type check and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: gr8r-studio/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            gr8r-studio/package-lock.json
+            server/package-lock.json
+      - name: gr8r-studio web app
+        working-directory: gr8r-studio
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run lint
+          npm run format:check
+          npm run build
+      - name: Server
+        working-directory: server
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run lint
+          npm test
+
+  scripts:
+    name: Check scripts (ShellCheck, bash 3.2, PSScriptAnalyzer)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: ShellCheck
+        run: docker run --rm -v "$PWD/local:/mnt:ro" koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d /mnt/check.sh
+      - name: check.sh parses in bash 3.2, the version on a Mac
+        run: docker run --rm -v "$PWD/local:/mnt:ro" bash:3.2@sha256:b6252c62fc86114f93f02104a486c71e6569371d95950ea7479a2ffd6b47f16a bash -n /mnt/check.sh
+      - name: PSScriptAnalyzer, for PowerShell 7 and Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          Install-PSResource PSScriptAnalyzer -Version 1.25.0 -TrustRepository -Quiet
+          $windows51 = 'win-48_x64_10.0.17763.0_5.1.17763.316_x64_4.0.30319.42000_framework'
+          $settings = @{
+            Rules = @{
+              PSUseCompatibleSyntax   = @{ Enable = $true; TargetVersions = @('5.1', '7.4') }
+              PSUseCompatibleCommands = @{ Enable = $true; TargetProfiles = @($windows51) }
+              PSUseCompatibleTypes    = @{ Enable = $true; TargetProfiles = @($windows51) }
+            }
+          }
+          $findings = @(Invoke-ScriptAnalyzer -Path local/check.ps1 -Settings $settings)
+          $findings | Format-Table -AutoSize Severity, Line, RuleName, Message | Out-String -Width 300
+          if ($findings.Count) { exit 1 }
+
+  windows-powershell:
+    name: check.ps1 in Windows PowerShell 5.1
+    runs-on: windows-2025
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Parses
+        run: |
+          $PSVersionTable.PSVersion
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD\local\check.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | Format-List; exit 1 }
+      - name: Runs, and cleans up with -Stop
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\local\check.ps1 -Stop
+
+  codeql:
+    name: Code scan (CodeQL, ${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:${{ matrix.language }}
+          output: codeql-results
+      - name: Fail on any finding
+        env:
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          jq -r '.runs[].results[] | "\(.ruleId) \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine) \(.message.text | split("\n")[0])"' codeql-results/*.sarif > findings.txt
+          count=$(wc -l < findings.txt)
+          if [ "$count" -gt 0 ]; then
+            echo "CodeQL ($LANGUAGE) found $count problem(s):"
+            cat findings.txt
+            { echo "### CodeQL ($LANGUAGE): $count finding(s)"; sed 's/^/- /' findings.txt; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "CodeQL ($LANGUAGE) found nothing."
+
+  gitleaks:
+    name: Secret scan of the whole history (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # No commit range: gitleaks reads every commit on every branch and tag, not only this pull request's.
+      - name: Scan every commit
+        run: |
+          echo "Commits on all branches and tags: $(git rev-list --all --count)"
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f git /repo --redact --no-banner --verbose
+
+  checkov:
+    name: Infrastructure scan (Checkov)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Dockerfile and workflows
+        run: docker run --rm -v "$PWD:/src:ro" bridgecrew/checkov:3.4.0@sha256:ece5efac4443084ca273072909985dce988a81e8cc94faa305aeda0df27c68f9 -d /src --framework dockerfile github_actions --compact --quiet
+
+  trivy-fs:
+    name: Dependency and secret scan (Trivy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Both lockfiles, including development dependencies
+        run: >-
+          docker run --rm -v "$PWD:/src:ro" aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+          fs --scanners vuln,secret --include-dev-deps --severity HIGH,CRITICAL --exit-code 1 --no-progress
+          --db-repository ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2 /src
+
+  image:
+    name: Build the image once (amd64 and arm64)
+    # Pull requests from forks get no token that can publish, so they stop at the scans above.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:sha-${{ env.COMMIT }}
+          build-args: GIT_COMMIT=${{ env.COMMIT }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Record the image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "Image for commit $COMMIT: \`$IMAGE@$DIGEST\`" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  image-scan:
+    name: Image scan (Trivy, ${{ matrix.platform }})
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Scan
+        env:
+          DIGEST: ${{ needs.image.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: >-
+          docker run --rm -v "$HOME/.docker/config.json:/root/.docker/config.json:ro"
+          aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+          image --platform "$PLATFORM" --scanners vuln,secret --severity HIGH,CRITICAL --exit-code 1 --no-progress
+          --db-repository ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2 "$IMAGE@$DIGEST"
+
+  local-check:
+    name: Local check (${{ matrix.title }})
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: mac-docker
+            title: Mac script in bash 3.2, Docker
+          - check: mac-podman
+            title: Mac script, Podman
+          - check: windows-docker
+            title: Windows script in PowerShell 7, Docker
+    env:
+      DIGEST: ${{ needs.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - if: matrix.check != 'mac-podman'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: matrix.check == 'mac-docker'
+        name: check.sh in bash 3.2 with Docker
+        run: |
+          docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.docker/config.json:/root/.docker/config.json:ro" -v "$PWD/local:/local:ro" \
+            bash:3.2@sha256:b6252c62fc86114f93f02104a486c71e6569371d95950ea7479a2ffd6b47f16a \
+            sh -c 'apk add --quiet --no-cache curl docker-cli && bash --version | head -1 && bash /local/check.sh --image "$0" --expect-commit "$1"' \
+            "$IMAGE@$DIGEST" "$COMMIT"
+      - if: matrix.check == 'mac-podman'
+        name: check.sh with Podman
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          podman --version
+          printf '%s' "$TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          bash local/check.sh --engine podman --image "$IMAGE@$DIGEST" --expect-commit "$COMMIT"
+      - if: matrix.check == 'windows-docker'
+        name: check.ps1 in PowerShell 7 with Docker
+        shell: pwsh
+        run: ./local/check.ps1 -Image "$env:IMAGE@$env:DIGEST" -ExpectCommit $env:COMMIT
+
+  promote:
+    name: Tag the image main
+    if: github.event_name == 'push'
+    needs: [lint-test, scripts, windows-powershell, codeql, gitleaks, checkov, trivy-fs, image, image-scan, local-check]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: promote-main
+      cancel-in-progress: false
+    env:
+      DIGEST: ${{ needs.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A newer commit's run may already have tagged its own image; never move main back to an older one.
+      - name: Check this commit is still the newest on main
+        id: tip
+        run: |
+          tip=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" refs/heads/main | cut -f1)
+          if [ "$tip" = "$COMMIT" ]; then
+            echo "newest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main has moved on to $tip, so its own run tags the image main."
+            echo "newest=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.tip.outputs.newest == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - if: steps.tip.outputs.newest == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.tip.outputs.newest == 'true'
+        name: Point main at this commit's image
+        run: |
+          docker buildx imagetools create --tag "$IMAGE:main" "$IMAGE@$DIGEST"
+          tagged=$(docker buildx imagetools inspect "$IMAGE:main" --format '{{.Manifest.Digest}}')
+          if [ "$tagged" != "$DIGEST" ]; then
+            echo "::error::main points at $tagged, not this commit's image $DIGEST."
+            exit 1
+          fi
+          docker logout ghcr.io
+      # Exactly what someone runs at home: no sign-in and no options, so it finds the image tagged main.
+      - if: steps.tip.outputs.newest == 'true'
+        name: Local check as a signed-out user (Mac script)
+        run: bash local/check.sh --expect-commit "$COMMIT"
+      - if: steps.tip.outputs.newest == 'true'
+        name: Local check as a signed-out user (Windows script)
+        shell: pwsh
+        run: ./local/check.ps1 -ExpectCommit $env:COMMIT

@@ -1,0 +1,8 @@
+# Only what the image is built from; everything else stays out of the build context.
+*
+!LICENSE
+!NOTICE
+!gr8r-studio/
+!server/
+**/node_modules
+**/dist
