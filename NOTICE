@@ -1,0 +1,15 @@
+Launch Tracker
+
+This repository's own code is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The gr8r-studio/ folder is not covered by that licence. It holds Gr8r Studio, imported
+unchanged from:
+
+  Project: Gr8r Studio
+  Author:  Gr8r Studio <gr8rstudio@gmail.com>
+  Source:  https://github.com/gr8rstudio/gr8r-studio
+  Commit:  904205c626918ee96054eb35495c394a60c0c601 (7 October 2026)
+
+All credit for those files goes to their author. The source repository publishes no
+licence, so this repository grants no licence for them. Any later change to a file in
+gr8r-studio/ is recorded in this repository's git history.
