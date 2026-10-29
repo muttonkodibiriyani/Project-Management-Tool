@@ -20,6 +20,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 TEMPLATE_VERSION = "1.0"
+OPENPYXL_VERSION = "3.1.5"  # pinned in requirements.txt; build() patches one of its internals
 
 # ---------------------------------------------------------------- vocabularies
 # Generic value lists: the workbook's own words, cleaned. Each workspace may
@@ -329,7 +330,7 @@ def _validate(wb, lay):
                 dv = DataValidation(type="date", operator="greaterThan", formula1="36526", allow_blank=True)
             else:
                 name = "lst_" + kind.lstrip("@")
-                dv = DataValidation(type="list", formula1=f"={name}", allow_blank=True)
+                dv = DataValidation(type="list", formula1=name, allow_blank=True)
                 if kind in ("@Brand", "@Vendor"):
                     dv.errorStyle = "warning"  # a new brand or vendor may be typed, with a warning
             dv.showErrorMessage = True
@@ -453,17 +454,17 @@ def _dashboard(wb, data):
     for j in range(4):
         c = ws.cell(5, 2 + j, stores[j] if j < len(stores) else None)
         c.fill = inp
-    dv = DataValidation(type="list", formula1="=lst_Launch", allow_blank=True)
+    dv = DataValidation(type="list", formula1="lst_Launch", allow_blank=True)
     dv.add("B4")
     ws.add_data_validation(dv)
-    dv2 = DataValidation(type="list", formula1="=lst_Store", allow_blank=True)
+    dv2 = DataValidation(type="list", formula1="lst_Store", allow_blank=True)
     dv2.add("B5:E5")
     ws.add_data_validation(dv2)
 
     def listed(store_cell, extra=""):
         parts = []
         for n in (1, 2):
-            parts.append(f'COUNTIFS(tblLines[Store {n}],{store_cell},tblLines[S{n} Listing],"Yes"{extra})')
+            parts.append(f'COUNTIFS(tblLines[Launch],$B$4,tblLines[Store {n}],{store_cell},tblLines[S{n} Listing],"Yes"{extra})')
         return f'IF({store_cell}="","",{"+".join(parts)})'
 
     r = 7
@@ -533,14 +534,14 @@ def _dashboard(wb, data):
             for j in range(4):
                 sc = f"{get_column_letter(2 + j)}$5"
                 crit = f"$A{r}" if _v else '""'
-                parts = [f"COUNTIFS(tblLines[Store {n}],{sc},tblLines[S{n} {gate}],{crit})" for n in (1, 2)]
+                parts = [f"COUNTIFS(tblLines[Launch],$B$4,tblLines[Store {n}],{sc},tblLines[S{n} {gate}],{crit})" for n in (1, 2)]
                 ws.cell(r, 2 + j, f'=IF({sc}="","",{"+".join(parts)})')
         if vocab in DONE:
             r += 1
             ws.cell(r, 1, "Done").font = HEAD_FONT
             for j in range(4):
                 sc = f"{get_column_letter(2 + j)}$5"
-                parts = [f'COUNTIFS(tblLines[Store {n}],{sc},tblLines[S{n} {gate}],"{d}")'
+                parts = [f'COUNTIFS(tblLines[Launch],$B$4,tblLines[Store {n}],{sc},tblLines[S{n} {gate}],"{d}")'
                          for n in (1, 2) for d in DONE[vocab]]
                 ws.cell(r, 2 + j, f'=IF({sc}="","",{"+".join(parts)})').font = HEAD_FONT
 
@@ -568,9 +569,7 @@ def _dashboard(wb, data):
 
     r += 2
     ws.cell(r, 1, "Fixture capacity vs allocation").font = HEAD_FONT
-    hdr = ["Fixture type"]
     for j in range(4):
-        L = get_column_letter(2 + 2 * j)
         ws.cell(r, 2 + 2 * j, f'=IF({get_column_letter(2 + j)}$5="","",{get_column_letter(2 + j)}$5&" capacity")').font = HEAD_FONT
         ws.cell(r, 3 + 2 * j, f'=IF({get_column_letter(2 + j)}$5="","",{get_column_letter(2 + j)}$5&" allocated")').font = HEAD_FONT
     for i, _t in enumerate(VOCAB["FixtureType"]):
@@ -579,7 +578,7 @@ def _dashboard(wb, data):
         for j in range(4):
             sc = f"${get_column_letter(2 + j)}$5"
             ws.cell(r, 2 + 2 * j, f'=IF({sc}="","",SUMIFS(tblCapacity[Count],tblCapacity[Store],{sc},tblCapacity[Fixture type],$A{r}))')
-            parts = [f"COUNTIFS(tblLines[Store {n}],{sc},tblLines[S{n} Fixture type],$A{r})" for n in (1, 2)]
+            parts = [f"COUNTIFS(tblLines[Launch],$B$4,tblLines[Store {n}],{sc},tblLines[S{n} Fixture type],$A{r})" for n in (1, 2)]
             ws.cell(r, 3 + 2 * j, f'=IF({sc}="","",{"+".join(parts)})')
     for col in range(2, 10):
         ws.column_dimensions[get_column_letter(col)].width = 13
@@ -634,7 +633,10 @@ def build(path, data=None):
     wb.calculation.fullCalcOnLoad = True
     # openpyxl writes floats with 16 significant digits; write the shortest exact form instead
     from openpyxl.cell import _writer
-    plain = _writer.safe_string
+    plain = getattr(_writer, "safe_string", None)
+    if plain is None:
+        raise RuntimeError(f"launch_workbook needs openpyxl {OPENPYXL_VERSION} (see requirements.txt); this openpyxl "
+                           "has no openpyxl.cell._writer.safe_string hook for exact float writing")
     _writer.safe_string = lambda v: repr(v) if isinstance(v, float) and v == v and abs(v) != float("inf") else plain(v)
     try:
         wb.save(path)

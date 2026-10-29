@@ -1,4 +1,6 @@
 # Real launch workbooks hold names, contacts and margins: keep them out of the repo.
-*.xlsx
-*.xlsm
+*.[xX][lL][sS][xX]
+*.[xX][lL][sS][mM]
+*.[xX][lL][sS]
+*.[xX][lL][sS][bB]
 !templates/launch-workbook/launch-workbook-template.xlsx

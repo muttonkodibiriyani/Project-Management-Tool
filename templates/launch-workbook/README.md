@@ -5,11 +5,18 @@ The importer reads this layout and the exporter writes it. It holds no launch da
 no brands, stores, vendors, contacts or margins.
 
 `launch_workbook.py` defines the schema (tables, columns, value lists, colour legend) and writes the
-workbook. Rebuild the template after changing the schema:
+workbook. It needs openpyxl 3.1.5 (pinned in `requirements.txt`; `build()` patches one openpyxl internal to
+write floats exactly, and stops with a message if that hook is missing). Rebuild the template after changing
+the schema, then run the checks:
 
 ```
+python3 -m pip install -r requirements.txt
 python3 launch_workbook.py launch-workbook-template.xlsx
+python3 -m unittest
 ```
+
+The checks fail if any Dashboard COUNTIFS or SUMIFS over `tblLines` lacks `tblLines[Launch],$B$4`, or if a
+dropdown source or colour-rule formula starts with `=`.
 
 An importer fills it by passing rows per table: `build(path, {"tblLines": [...], ...})`.
 
