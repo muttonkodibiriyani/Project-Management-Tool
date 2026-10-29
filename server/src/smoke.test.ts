@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { createServer, type AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
@@ -7,6 +9,7 @@ import type { HealthReport } from './health.js';
 import { smoke } from './smoke.js';
 
 const GR8R_DIST = fileURLToPath(new URL('../../gr8r-studio/dist/', import.meta.url));
+assert.ok(existsSync(join(GR8R_DIST, 'index.html')), `Build gr8r-studio first (cd gr8r-studio && npm ci && npm run build): ${GR8R_DIST} has no index.html.`);
 const COMMIT = 'c'.repeat(40);
 const DIGEST = `sha256:${'d'.repeat(64)}`;
 
