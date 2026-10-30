@@ -1,5 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import fastifyStatic from '@fastify/static';
 import Fastify, { LogController, type FastifyInstance } from 'fastify';
+import type pg from 'pg';
+import { api } from './api/plugin.js';
 import type { HealthReport } from './health.js';
 
 /**
@@ -35,20 +38,27 @@ const SECURITY_HEADERS = {
 export interface AppOptions {
   publicDir: string;
   health: () => Promise<HealthReport>;
+  pool: pg.Pool;
   logger?: boolean;
 }
 
-export function buildApp({ publicDir, health, logger = false }: AppOptions): FastifyInstance {
+export function buildApp({ publicDir, health, pool, logger = false }: AppOptions): FastifyInstance {
   const app = Fastify({
     logger,
     logController: new LogController({ disableRequestLogging: request => request.url === '/healthz' }),
+    genReqId: () => randomUUID(),
+    // API bodies are checked as sent: an unknown property is an error, never silently dropped.
+    ajv: { customOptions: { removeAdditional: false, allErrors: true } },
   });
 
   app.addHook('onSend', async (request, reply) => {
     reply.headers(SECURITY_HEADERS);
+    reply.header('x-request-id', request.id);
     // Vite names every file under /assets/ after its content, so those never change.
     const immutable = reply.statusCode === 200 && request.url.startsWith('/assets/');
-    reply.header('cache-control', immutable ? 'public, max-age=31536000, immutable' : 'no-cache');
+    // API answers can hold margins and contacts: no browser or proxy keeps them.
+    const policy = request.url.startsWith('/api/v1') ? 'private, no-store' : immutable ? 'public, max-age=31536000, immutable' : 'no-cache';
+    reply.header('cache-control', policy);
   });
 
   app.setErrorHandler(async (error: { statusCode?: number; message: string }, request, reply) => {
@@ -66,6 +76,7 @@ export function buildApp({ publicDir, health, logger = false }: AppOptions): Fas
     return reply.code(report.status === 'ok' ? 200 : 503).send(report);
   });
 
+  void app.register(api, { prefix: '/api/v1', pool });
   void app.register(fastifyStatic, { root: publicDir, cacheControl: false });
 
   return app;

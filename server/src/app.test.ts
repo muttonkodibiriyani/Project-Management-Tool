@@ -4,10 +4,13 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import pg from 'pg';
 import { buildApp, CONTENT_SECURITY_POLICY } from './app.js';
 import type { HealthReport } from './health.js';
 
 const GR8R_DIST = fileURLToPath(new URL('../../gr8r-studio/dist/', import.meta.url));
+/** These tests never reach the database; a pool only connects on its first query. */
+const pool = new pg.Pool();
 assert.ok(existsSync(join(GR8R_DIST, 'index.html')), `Build gr8r-studio first (cd gr8r-studio && npm ci && npm run build): ${GR8R_DIST} has no index.html.`);
 const ASSETS = readdirSync(join(GR8R_DIST, 'assets'));
 
@@ -17,10 +20,10 @@ const report = (status: HealthReport['status']): HealthReport => ({
   imageDigest: `sha256:${'d'.repeat(64)}`,
   checks: [{ name: 'PostgreSQL', ok: status === 'ok', ms: 1, ...(status === 'ok' ? {} : { error: 'PostgreSQL refused the connection at postgres:5432.' }) }],
 });
-const app = (status: HealthReport['status'] = 'ok') => buildApp({ publicDir: GR8R_DIST, health: () => Promise.resolve(report(status)) });
+const app = (status: HealthReport['status'] = 'ok') => buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.resolve(report(status)) });
 
 test('/healthz answers without asking the database or storage', async () => {
-  const response = await buildApp({ publicDir: GR8R_DIST, health: () => Promise.reject(new Error('not called')) }).inject('/healthz');
+  const response = await buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.reject(new Error('not called')) }).inject('/healthz');
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), { status: 'ok' });
 });

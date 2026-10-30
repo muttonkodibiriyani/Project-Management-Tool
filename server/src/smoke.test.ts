@@ -2,16 +2,19 @@ import assert from 'node:assert/strict';
 import { createServer, type AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import pg from 'pg';
 import { buildApp } from './app.js';
 import type { HealthReport } from './health.js';
 import { smoke } from './smoke.js';
 
 const GR8R_DIST = fileURLToPath(new URL('../../gr8r-studio/dist/', import.meta.url));
+/** These tests never reach the database; a pool only connects on its first query. */
+const pool = new pg.Pool();
 const COMMIT = 'c'.repeat(40);
 const DIGEST = `sha256:${'d'.repeat(64)}`;
 
 async function run(report: HealthReport, options: { expectDigest?: string; expectCommit?: string } = {}) {
-  const app = buildApp({ publicDir: GR8R_DIST, health: () => Promise.resolve(report) });
+  const app = buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.resolve(report) });
   await app.listen({ host: '127.0.0.1', port: 0 });
   const lines: string[] = [];
   try {
@@ -37,6 +40,7 @@ test('passes against a healthy app and ends with the commit and image digest', a
   assert.equal(passed, true, lines.join('\n'));
   assert.ok(lines.includes('PASS Blob storage is reachable (3 ms)'));
   assert.match(lines.join('\n'), /PASS the web app loads with its security policy \(page and \d+ files\)/);
+  assert.ok(lines.includes('PASS the API refuses callers who have not signed in'));
   assert.equal(lines.at(-1), `Smoke test passed. commit=${COMMIT} image=${DIGEST}`);
 });
 
