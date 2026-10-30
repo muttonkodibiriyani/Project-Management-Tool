@@ -136,7 +136,7 @@ say "Starting Launch Tracker"
 "$engine" run -d --name "$NAME-app" --network "$NAME" -p "127.0.0.1:$port:8080" \
   -e PGHOST="$NAME-postgres" -e PGDATABASE=launchtracker -e PGUSER=lt_app -e PGPASSWORD="$app_password" -e PGSSLMODE=disable \
   -e BLOB_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=launchtracker;AccountKey=$storage_key;BlobEndpoint=http://$NAME-storage:10000/launchtracker;" \
-  -e BLOB_CONTAINER=launch-tracker -e IMAGE_DIGEST="$digest" \
+  -e BLOB_CONTAINER=launch-tracker -e IMAGE_DIGEST="$digest" -e AUTH_MODE=dev \
   "$image" >/dev/null || fail "could not start Launch Tracker; the $engine message above says why."
 
 say "Running the smoke test"

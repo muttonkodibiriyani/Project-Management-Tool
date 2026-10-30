@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { allows, APP_ROLES, editsGate, editsLine, isAccess, permissions, type Actor, type AppRole } from './policy.js';
+import { APP_ROLES, type AppRole } from '../auth/roles.js';
+import { allows, editsGate, editsLine, isAccess, permissions, type Actor } from './policy.js';
 
 const ENTRA_TEAMS: Partial<Record<AppRole, string>> = { BrandTeam: 'brand', Supply: 'supply', VM: 'vm', Comms: 'comms' };
 const actor = (...roles: AppRole[]): Actor => ({ userId: 'u1', roles, teams: roles.flatMap(role => ENTRA_TEAMS[role] ?? []) });

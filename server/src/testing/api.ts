@@ -1,16 +1,18 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import pg from 'pg';
-import { APP_ROLES, type AppRole } from '../access/policy.js';
-import { SESSION_COOKIE } from '../api/context.js';
 import { buildApp } from '../app.js';
+import { APP_ROLES, type AppRole } from '../auth/roles.js';
+import { SESSION_COOKIE } from '../auth/plugin.js';
+import { hashToken } from '../auth/sessions.js';
 import { migrate } from '../db/migrate.js';
 import { APP_ROLE_PASSWORD, emptyDatabase, TEST_DATABASE_URL } from './database.js';
+import { devAuth } from './sessions.js';
 
 /** One synthetic user per Entra app role, plus a Launch.Manager who is in no workspace. */
 export const USERS = {
@@ -82,7 +84,7 @@ export async function apiFixture(t: TestContext): Promise<Fixture> {
     await db.query(
       `insert into user_session (user_id, token_hash, expires_at, revoked_at)
        values ($1, $2, now() + case when $3 = 'expired' then interval '-1 minute' else interval '12 hours' end, case when $3 = 'revoked' then now() end)`,
-      [userId, createHash('sha256').update(token).digest(), ended ?? null],
+      [userId, hashToken(token), ended ?? null],
     );
     return `${SESSION_COOKIE}=${token}`;
   };
@@ -132,6 +134,7 @@ export async function apiFixture(t: TestContext): Promise<Fixture> {
     publicDir: mkdtempSync(join(tmpdir(), 'lt-public-')),
     pool,
     health: () => Promise.resolve({ status: 'ok', commit: '', imageDigest: '', checks: [] }),
+    auth: devAuth(),
   });
   const routes = new Set<string>();
   app.addHook('onRoute', route => {

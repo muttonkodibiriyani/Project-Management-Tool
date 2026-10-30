@@ -188,7 +188,7 @@ Show-Step 'Starting Launch Tracker'
 $storage = "DefaultEndpointsProtocol=http;AccountName=launchtracker;AccountKey=$storageKey;BlobEndpoint=http://$Name-storage:10000/launchtracker;"
 & $Engine run -d --name "$Name-app" --network $Name -p "127.0.0.1:${Port}:8080" `
   -e "PGHOST=$Name-postgres" -e PGDATABASE=launchtracker -e PGUSER=lt_app -e "PGPASSWORD=$appPassword" -e PGSSLMODE=disable `
-  -e "BLOB_CONNECTION_STRING=$storage" -e BLOB_CONTAINER=launch-tracker -e "IMAGE_DIGEST=$digest" `
+  -e "BLOB_CONNECTION_STRING=$storage" -e BLOB_CONTAINER=launch-tracker -e "IMAGE_DIGEST=$digest" -e AUTH_MODE=dev `
   $Image | Out-Null
 if ($LASTEXITCODE -ne 0) { Show-Failure "could not start Launch Tracker; the $Engine message above says why." }
 

@@ -1,10 +1,8 @@
-import { createHash } from 'node:crypto';
 import type { FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import type { Access, Actor, WorkspaceSettings } from '../access/policy.js';
+import { hashToken } from '../auth/sessions.js';
 import { ApiError, notFound } from './problem.js';
-
-export const SESSION_COOKIE = '__Host-lt_session';
 
 export interface Caller {
   userId: string;
@@ -34,7 +32,7 @@ declare module 'fastify' {
 /** The signed-in caller, from the session cookie set by /auth/callback. Sign-in creates sessions; this only reads them. */
 export async function loadCaller(pool: pg.Pool, token: string | undefined): Promise<Caller> {
   if (!token) throw new ApiError(401, 'unauthenticated', 'You are not signed in. Sign in at /auth/login and try again.');
-  const hash = createHash('sha256').update(token).digest();
+  const hash = hashToken(token);
   const { rows } = await pool.query<{
     id: string;
     user_id: string;

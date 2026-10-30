@@ -1,6 +1,6 @@
 import { Type, type TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import type { FastifyInstance } from 'fastify';
-import { APP_ROLES } from '../../access/policy.js';
+import { APP_ROLES } from '../../auth/roles.js';
 import { tx } from '../../db/tx.js';
 import { callerOf, workspaceOf } from '../context.js';
 import { ifMatch, toApi, withEtag, type Row } from '../http.js';

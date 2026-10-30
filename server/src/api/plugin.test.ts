@@ -3,10 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import Fastify, { type LightMyRequestResponse } from 'fastify';
 import pg from 'pg';
-import type { AppRole } from '../access/policy.js';
+import type { AppRole } from '../auth/roles.js';
+import { SESSION_COOKIE } from '../auth/plugin.js';
 import { apiFixture, USERS, WS, type UserName } from '../testing/api.js';
 import { skipWithoutDatabase } from '../testing/database.js';
-import { SESSION_COOKIE } from './context.js';
 import { api, RATE_LIMIT } from './plugin.js';
 
 const MEMBERS = (Object.keys(USERS) as UserName[]).filter(name => name !== 'outsider');

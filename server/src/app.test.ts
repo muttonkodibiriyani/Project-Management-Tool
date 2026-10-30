@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { devAuth } from './testing/sessions.js';
 import { buildApp, CONTENT_SECURITY_POLICY } from './app.js';
 import { publicHealth, type HealthReport } from './health.js';
 
@@ -20,10 +21,10 @@ const report = (status: HealthReport['status']): HealthReport => ({
   imageDigest: `sha256:${'d'.repeat(64)}`,
   checks: [{ name: 'PostgreSQL', ok: status === 'ok', ms: 1, ...(status === 'ok' ? {} : { error: 'PostgreSQL refused the connection at postgres:5432.' }) }],
 });
-const app = (status: HealthReport['status'] = 'ok') => buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.resolve(report(status)) });
+const app = (status: HealthReport['status'] = 'ok') => buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.resolve(report(status)), auth: devAuth() });
 
 test('/healthz answers without asking the database or storage', async () => {
-  const response = await buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.reject(new Error('not called')) }).inject('/healthz');
+  const response = await buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.reject(new Error('not called')), auth: devAuth() }).inject('/healthz');
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), { status: 'ok' });
 });
@@ -49,6 +50,7 @@ test('/api/health writes why a check failed to the server log', async () => {
     publicDir: GR8R_DIST,
     pool,
     health: () => Promise.resolve(report('failing')),
+    auth: devAuth(),
     logger: { level: 'error', stream: { write: (line: string) => lines.push(line) } },
   });
   await logged.inject('/api/health');

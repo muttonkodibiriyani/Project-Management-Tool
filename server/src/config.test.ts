@@ -2,6 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ConfigError, loadConfig, loadDatabaseConfig } from './config.js';
 
+const ENTRA = {
+  AUTH_MODE: 'entra',
+  ENTRA_TENANT_ID: '11111111-1111-4111-8111-111111111111',
+  ENTRA_CLIENT_ID: '22222222-2222-4222-8222-222222222222',
+  PUBLIC_ORIGIN: 'https://launch.example.test',
+  SESSION_SIGNING_KEY: Buffer.alloc(32, 7).toString('base64'),
+  CONTAINER_APP_NAME: 'ca-launch-tracker',
+};
+
 const LOCAL = {
   PGHOST: 'postgres',
   PGDATABASE: 'launchtracker',
@@ -10,6 +19,7 @@ const LOCAL = {
   PGSSLMODE: 'disable',
   BLOB_CONNECTION_STRING: 'BlobEndpoint=http://azurite:10000/launchtracker;AccountName=launchtracker;AccountKey=c3ludGhldGlj',
   BLOB_CONTAINER: 'files',
+  AUTH_MODE: 'dev',
 };
 
 test('a laptop signs in to its own database and storage with a password and a connection string', () => {
@@ -39,6 +49,7 @@ test('Azure signs in with the managed identity and verifies TLS', () => {
     BLOB_CONTAINER: 'files',
     GIT_COMMIT: 'a'.repeat(40),
     IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
+    ...ENTRA,
   });
   assert.deepEqual(config.database, {
     host: 'launch.postgres.database.azure.com',
