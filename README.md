@@ -45,8 +45,23 @@ docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) -t launch-tracker .
 
 Every pull request runs lint, type checks and tests; ShellCheck and PSScriptAnalyzer on the check
 scripts; CodeQL, gitleaks over the whole history, Checkov and Trivy; then builds the image for amd64
-and arm64, scans it, and runs both check scripts against it with Docker and Podman. On main, the
-image that passed all of that is tagged `main`.
+and arm64, scans it, runs both check scripts against it with Docker and Podman, and drives it end
+to end in Chromium and Firefox. On main, the image that passed all of that is tagged `main`.
+
+### End-to-end tests
+
+`e2e/` holds the browser tests. They run against an image by digest, the same one CI built, with
+PostgreSQL, Blob storage and Playwright all in containers, so you need only Docker or Podman:
+
+```sh
+bash e2e/run.sh --image ghcr.io/muttonkodibiriyani/launch-tracker@sha256:<digest>
+bash e2e/run.sh --image <name>@sha256:<digest> --browser firefox --repeat 3   # hunt for flaky tests
+```
+
+`tests/gr8r-checklist/` checks that every gr8r-studio feature we keep still works, one file per
+group of features in section 2 of the product spec. Each test starts from the seeded demo workspace
+in a fresh browser, with the clock fixed and synthetic data only. A failed test leaves a trace,
+screenshot and video in `e2e/test-results`; in CI they are attached to the run.
 
 ## Licence
 
