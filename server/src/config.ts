@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { isProduction, loadAuthConfig, type AuthConfig } from './auth/config.js';
 
 /**
  * Settings come only from the environment, so one image runs unchanged on a laptop and in Azure.
@@ -22,6 +23,7 @@ export interface Config {
   imageDigest: string | null;
   database: DatabaseConfig;
   storage: StorageConfig;
+  auth: AuthConfig;
 }
 
 export class ConfigError extends Error {}
@@ -75,6 +77,11 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const { read, required, port, matching } = reader(env, problems);
 
   const connectionString = read('BLOB_CONNECTION_STRING');
+  if (connectionString && isProduction(env)) {
+    problems.push(
+      'BLOB_CONNECTION_STRING holds a storage account key, which is refused where CONTAINER_APP_NAME or NODE_ENV=production is set. Set BLOB_ACCOUNT_URL and AZURE_CLIENT_ID instead',
+    );
+  }
   const clientId =
     read('PGPASSWORD') && connectionString
       ? ''
@@ -98,6 +105,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     imageDigest: matching('IMAGE_DIGEST', /^sha256:[0-9a-f]{64}$/, 'an image digest like sha256:<64 hex characters>'),
     database,
     storage,
+    auth: loadAuthConfig(env, problems),
   };
   stopIf(problems, 'Launch Tracker');
   return config;

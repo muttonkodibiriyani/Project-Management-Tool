@@ -110,7 +110,7 @@ done
 "$engine" run -d --name "$NAME-app" --network "$NAME" \
   -e PGHOST="$NAME-postgres" -e PGDATABASE=launchtracker -e PGUSER=launchtracker -e PGPASSWORD="$db_password" -e PGSSLMODE=disable \
   -e BLOB_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=launchtracker;AccountKey=$storage_key;BlobEndpoint=http://$NAME-storage:10000/launchtracker;" \
-  -e BLOB_CONTAINER=launch-tracker \
+  -e BLOB_CONTAINER=launch-tracker -e AUTH_MODE=dev \
   "$image" >/dev/null || fail "the app did not start; the $engine message above says why."
 
 say "Running the end-to-end suite (each test ${repeat} time(s))"

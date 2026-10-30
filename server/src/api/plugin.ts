@@ -4,7 +4,8 @@ import fastifyRateLimit from '@fastify/rate-limit';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { allows, isAccess } from '../access/policy.js';
-import { loadCaller, loadWorkspace, SESSION_COOKIE } from './context.js';
+import { SESSION_COOKIE } from '../auth/plugin.js';
+import { loadCaller, loadWorkspace } from './context.js';
 import { ApiError, type FieldError } from './problem.js';
 import { routes } from './routes/index.js';
 

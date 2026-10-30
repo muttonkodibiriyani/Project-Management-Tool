@@ -1,7 +1,6 @@
 /** Who may do what (API doc section 2). Every route and every field check asks this file, never its own copy of the rules. */
 
-export const APP_ROLES = ['Workspace.Admin', 'Launch.Manager', 'BrandTeam', 'Supply', 'VM', 'Comms', 'Viewer'] as const;
-export type AppRole = (typeof APP_ROLES)[number];
+import { APP_ROLES, type AppRole } from '../auth/roles.js';
 
 /** What a route needs: any member, an editor (any role but Viewer), or one of the listed roles. */
 export type Access = 'any' | 'editor' | readonly AppRole[];

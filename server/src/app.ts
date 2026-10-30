@@ -4,6 +4,7 @@ import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions
 import type pg from 'pg';
 import { api } from './api/plugin.js';
 import { publicHealth, type HealthReport } from './health.js';
+import { installAuth, type AuthOptions } from './auth/plugin.js';
 
 /**
  * gr8r-studio makes no network calls of its own and loads only its own files plus Google Fonts.
@@ -39,10 +40,11 @@ export interface AppOptions {
   publicDir: string;
   health: () => Promise<HealthReport>;
   pool: pg.Pool;
+  auth: AuthOptions;
   logger?: FastifyServerOptions['logger'];
 }
 
-export function buildApp({ publicDir, health, pool, logger = false }: AppOptions): FastifyInstance {
+export function buildApp({ publicDir, health, pool, auth, logger = false }: AppOptions): FastifyInstance {
   const app = Fastify({
     logger,
     logController: new LogController({ disableRequestLogging: request => request.url === '/healthz' }),
@@ -67,6 +69,8 @@ export function buildApp({ publicDir, health, pool, logger = false }: AppOptions
     request.log.error({ err: error }, 'request failed');
     return reply.code(status).send({ error: `The server could not handle this request. Try again; if it keeps failing, report request ${request.id}.` });
   });
+
+  installAuth(app, auth);
 
   // Liveness: answers while the process runs, whatever the state of the database and storage.
   app.get('/healthz', () => ({ status: 'ok' }));
