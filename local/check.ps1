@@ -48,6 +48,7 @@ $PostgresImage = 'docker.io/library/postgres:16-alpine@sha256:0cefaabd882e42bcb2
 $AzuriteImage = 'mcr.microsoft.com/azure-storage/azurite:3.37.0@sha256:830430c1da1a2d537e08f3e6764dd1f5ae00cf0346bcaf625b968ec3f0971fd5'
 $Name = 'launch-tracker-check'
 $Shell = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh' } else { 'powershell' }
+$Started = $false
 $StopCommand = "$Shell -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Stop"
 
 function Show-Step([string]$Message) {
@@ -57,6 +58,7 @@ function Show-Step([string]$Message) {
 function Show-Failure([string]$Message) {
   Write-Host ''
   Write-Host "Check failed: $Message" -ForegroundColor Red
+  if ($script:Started) { Write-Host "Remove what this run started with: $StopCommand" }
   exit 1
 }
 
@@ -148,6 +150,7 @@ $bytes = New-Object byte[] 48
 [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
 $dbPassword = -join ($bytes[0..15] | ForEach-Object { $_.ToString('x2') })
 $storageKey = [Convert]::ToBase64String($bytes, 16, 32)
+$Started = $true
 & $Engine network create $Name | Out-Null
 if ($LASTEXITCODE -ne 0) { Show-Failure "could not create the $Name network; the $Engine message above says why." }
 & $Engine run -d --name "$Name-postgres" --network $Name --tmpfs /var/lib/postgresql/data `
@@ -185,7 +188,7 @@ if ($ExpectCommit) { $smoke += @('--expect-commit', $ExpectCommit) }
 if ($LASTEXITCODE -ne 0) {
   Show-Step 'The app log:'
   & $Engine logs --tail 40 "$Name-app"
-  Show-Failure "the smoke test failed; the lines marked FAIL above say what to fix. Remove everything with: $StopCommand"
+  Show-Failure 'the smoke test failed; the lines marked FAIL above say what to fix.'
 }
 try {
   Invoke-WebRequest -UseBasicParsing -ErrorAction Stop "http://127.0.0.1:$Port/healthz" | Out-Null
