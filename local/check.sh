@@ -19,6 +19,7 @@ NAME=launch-tracker-check
 say() { printf '==> %s\n' "$*"; }
 fail() {
   printf '\nCheck failed: %s\n' "$*" >&2
+  [ "$started" = 0 ] || printf 'Remove what this run started with: bash %s --stop\n' "$0" >&2
   exit 1
 }
 usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
@@ -28,6 +29,7 @@ port=8080
 engine=""
 expect_commit=""
 stop=0
+started=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --image | --port | --engine | --expect-commit)
@@ -64,7 +66,7 @@ case "$engine" in docker | podman) ;; *) fail "--engine must be docker or podman
 "$engine" info >/dev/null 2>&1 || fail "$engine is not running. Start it, then run this again."
 
 remove_all() {
-  "$engine" rm -f -v "$NAME-smoke" "$NAME-app" "$NAME-storage" "$NAME-postgres" >/dev/null 2>&1 || true
+  "$engine" rm -f -v "$NAME-smoke" "$NAME-app" "$NAME-migrate" "$NAME-storage" "$NAME-postgres" >/dev/null 2>&1 || true
   "$engine" network rm "$NAME" >/dev/null 2>&1 || true
 }
 
@@ -101,7 +103,9 @@ done
 
 say "Starting PostgreSQL and Blob storage (empty, with throwaway passwords)"
 db_password=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+app_password=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
 storage_key=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+started=1
 "$engine" network create "$NAME" >/dev/null || fail "could not create the $NAME network; the $engine message above says why."
 "$engine" run -d --name "$NAME-postgres" --network "$NAME" --tmpfs /var/lib/postgresql/data \
   -e POSTGRES_USER=launchtracker -e POSTGRES_DB=launchtracker -e POSTGRES_PASSWORD="$db_password" \
@@ -119,9 +123,18 @@ until "$engine" exec "$NAME-postgres" pg_isready -q -h 127.0.0.1 -U launchtracke
   sleep 1 && waited=$((waited + 1))
 done
 
+# As in Azure: the migration runs as the schema owner, and the app as lt_app, which cannot change the schema.
+say "Creating the database tables"
+"$engine" exec "$NAME-postgres" psql -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U launchtracker -d launchtracker \
+  -c "create role lt_app login password '$app_password'" >/dev/null ||
+  fail "could not create the app's database role; the PostgreSQL message above says why. Remove everything with: bash $0 --stop"
+"$engine" run --rm --name "$NAME-migrate" --network "$NAME" \
+  -e PGHOST="$NAME-postgres" -e PGDATABASE=launchtracker -e PGUSER=launchtracker -e PGPASSWORD="$db_password" -e PGSSLMODE=disable \
+  "$image" dist/migrate.js || fail "the migration failed; the message above says why. Remove everything with: bash $0 --stop"
+
 say "Starting Launch Tracker"
 "$engine" run -d --name "$NAME-app" --network "$NAME" -p "127.0.0.1:$port:8080" \
-  -e PGHOST="$NAME-postgres" -e PGDATABASE=launchtracker -e PGUSER=launchtracker -e PGPASSWORD="$db_password" -e PGSSLMODE=disable \
+  -e PGHOST="$NAME-postgres" -e PGDATABASE=launchtracker -e PGUSER=lt_app -e PGPASSWORD="$app_password" -e PGSSLMODE=disable \
   -e BLOB_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=launchtracker;AccountKey=$storage_key;BlobEndpoint=http://$NAME-storage:10000/launchtracker;" \
   -e BLOB_CONTAINER=launch-tracker -e IMAGE_DIGEST="$digest" \
   "$image" >/dev/null || fail "could not start Launch Tracker; the $engine message above says why."
@@ -132,7 +145,7 @@ set -- "dist/smoke.js" "http://$NAME-app:8080" --expect-digest "$digest" --wait 
 if ! "$engine" run --rm --name "$NAME-smoke" --network "$NAME" "$image" "$@"; then
   printf '\nThe app log:\n' >&2
   "$engine" logs --tail 40 "$NAME-app" >&2 || true
-  fail "the smoke test failed; the lines marked FAIL above say what to fix. Remove everything with: bash $0 --stop"
+  fail "the smoke test failed; the lines marked FAIL above say what to fix."
 fi
 curl -fsS -o /dev/null "http://127.0.0.1:$port/healthz" ||
   fail "the app answers inside $engine but not at http://127.0.0.1:$port. Check that nothing else (a VPN or firewall) holds that port."
