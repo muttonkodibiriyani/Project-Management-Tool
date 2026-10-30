@@ -85,7 +85,7 @@ jobs:
         with:
           persist-credentials: false
       - name: ShellCheck
-        run: docker run --rm -v "$PWD:/mnt:ro" koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d /mnt/local/check.sh /mnt/e2e/run.sh
+        run: docker run --rm -v "$PWD:/mnt:ro" koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d /mnt/local/check.sh /mnt/e2e/run.sh /mnt/azure/deploy.sh
       - name: check.sh and e2e/run.sh parse in bash 3.2, the version on a Mac
         run: |
           for script in local/check.sh e2e/run.sh; do
@@ -190,6 +190,47 @@ jobs:
           persist-credentials: false
       - name: Dockerfile and workflows
         run: docker run --rm -v "$PWD:/src:ro" bridgecrew/checkov:3.4.0@sha256:ece5efac4443084ca273072909985dce988a81e8cc94faa305aeda0df27c68f9 -d /src --framework dockerfile github_actions --compact --quiet
+
+  bicep:
+    name: Infrastructure as code (Bicep build, lint and Checkov)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BICEP_VERSION: v0.48.1
+      BICEP_SHA256: b09ec25a9d376c1f8e33ede6ed22b587f915ad68488d5db77a6f9541748c7f6e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the Bicep CLI, checked against its pinned sha256
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bicep" "https://github.com/Azure/bicep/releases/download/$BICEP_VERSION/bicep-linux-x64"
+          echo "$BICEP_SHA256  $RUNNER_TEMP/bicep" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/bicep"
+          "$RUNNER_TEMP/bicep" --version
+      # bicep lint exits 0 on warnings, so any output at all fails the step.
+      - name: Lint and build main, jobs and app
+        run: |
+          failed=0
+          for file in azure/main.bicep azure/jobs.bicep azure/app.bicep; do
+            status=0
+            lint=$("$RUNNER_TEMP/bicep" lint "$file" 2>&1) || status=1
+            build=$("$RUNNER_TEMP/bicep" build "$file" --outdir "$RUNNER_TEMP/arm" 2>&1) || status=1
+            if [ "$status" -ne 0 ] || [ -n "$lint$build" ]; then
+              echo "::error file=$file::bicep lint or build reported problems in $file. Fix each one below, or disable the rule in azure/bicepconfig.json with a reason."
+              printf '%s\n' "$lint" "$build" | awk 'NF && !seen[$0]++'
+              failed=1
+            else
+              echo "$file: lint and build are clean."
+            fi
+          done
+          exit "$failed"
+      # Checkov's Bicep parser cannot read cidrSubnet and other current Bicep, so it scans the built templates.
+      # Skipped, each by decision: CKV_AZURE_36, storage allows only its private endpoint, with no trusted-services
+      # bypass; CKV_AZURE_43, the generated name stlt<uniqueString> is valid; CKV_AZURE_41, the session key has no
+      # rotation yet, so an expiry would stop sign-in; CKV_AZURE_166, quarantine would block az acr import.
+      - name: Scan the built templates (Checkov)
+        run: docker run --rm -v "$RUNNER_TEMP/arm:/src:ro" bridgecrew/checkov:3.4.0@sha256:ece5efac4443084ca273072909985dce988a81e8cc94faa305aeda0df27c68f9 -d /src --framework arm --skip-check CKV_AZURE_36,CKV_AZURE_43,CKV_AZURE_41,CKV_AZURE_166 --compact --quiet
 
   trivy-fs:
     name: Dependency and secret scan (Trivy)
@@ -365,7 +406,7 @@ jobs:
   promote:
     name: Tag the image main
     if: github.event_name == 'push'
-    needs: [lint-test, scripts, windows-powershell, codeql, gitleaks, checkov, trivy-fs, image, image-scan, local-check, e2e]
+    needs: [lint-test, scripts, windows-powershell, codeql, gitleaks, checkov, bicep, trivy-fs, image, image-scan, local-check, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
