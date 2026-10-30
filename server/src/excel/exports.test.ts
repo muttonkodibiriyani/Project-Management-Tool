@@ -140,7 +140,7 @@ test('no exported cell is a formula, and formula-like text is stored as text', (
   assert.match(styles, /<xf [^>]*quotePrefix="1"\/><\/cellXfs>/);
   const linesXml = part(parts, 'xl/worksheets/sheet2.xml');
   for (const text of ['=HYPERLINK', '@SUM', '+1 555']) {
-    const c = new RegExp(`<c r="[A-Z]+\\d+"( s="\\d+")? t="inlineStr"><is><t>${text.replace(/[+]/g, '\\+')}`).exec(linesXml);
+    const c = new RegExp(`<c r="[A-Z]+\\d+"( s="\\d+")? t="inlineStr"><is><t>${text.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}`).exec(linesXml);
     assert.ok(c, text);
     assert.equal(c[1], ` s="${textStyle}"`, `${text} is marked as text`);
   }
