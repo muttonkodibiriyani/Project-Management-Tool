@@ -36,6 +36,7 @@ test('a laptop signs in to its own database and storage with a password and a co
   assert.equal(config.port, 8080);
   assert.equal(config.commit, null);
   assert.equal(config.imageDigest, null);
+  assert.equal(config.proxyHops, 0, 'off Azure no proxy is trusted, so X-Forwarded-For is ignored');
 });
 
 test('Azure signs in with the managed identity and verifies TLS', () => {
@@ -61,6 +62,7 @@ test('Azure signs in with the managed identity and verifies TLS', () => {
   });
   assert.deepEqual(config.storage, { container: 'files', accountUrl: 'https://stlaunch.blob.core.windows.net', clientId });
   assert.equal(config.commit, 'a'.repeat(40));
+  assert.equal(config.proxyHops, 1, 'in Container Apps only the ingress hop is trusted');
 });
 
 test('every missing setting is named in one message', () => {

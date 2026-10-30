@@ -42,11 +42,14 @@ export interface AppOptions {
   pool: pg.Pool;
   auth: AuthOptions;
   logger?: FastifyServerOptions['logger'];
+  /** Trusted proxy hops for request.ip (Config.proxyHops); 0 ignores X-Forwarded-For. */
+  proxyHops?: number;
 }
 
-export function buildApp({ publicDir, health, pool, auth, logger = false }: AppOptions): FastifyInstance {
+export function buildApp({ publicDir, health, pool, auth, logger = false, proxyHops = 0 }: AppOptions): FastifyInstance {
   const app = Fastify({
     logger,
+    trustProxy: (_address: string, hop: number) => hop < proxyHops,
     logController: new LogController({ disableRequestLogging: request => request.url === '/healthz' }),
     genReqId: () => randomUUID(),
     // API bodies are checked as sent: an unknown property is an error, never silently dropped.

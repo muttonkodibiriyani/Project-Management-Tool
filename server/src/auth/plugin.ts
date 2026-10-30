@@ -1,4 +1,5 @@
 import fastifyCookie, { type CookieSerializeOptions } from '@fastify/cookie';
+import fastifyRateLimit from '@fastify/rate-limit';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { hkdfSync } from 'node:crypto';
 import { EncryptJWT, jwtDecrypt } from 'jose';
@@ -12,6 +13,8 @@ export type AuthOptions = { sessions: SessionWriter; signingKey: Buffer } & ({ m
 export const SESSION_COOKIE = '__Host-lt_session';
 const PENDING_COOKIE = '__Host-lt_auth';
 const PENDING_MINUTES = 10;
+/** Sign-in requests a minute from one address (architecture doc): enough for people, too few to guess at. */
+export const AUTH_RATE_LIMIT = 10;
 /** Sign-out, like every API change, must carry this header; no CORS headers are sent, so no other origin can add it. */
 export const CSRF_HEADER = 'x-requested-with';
 const CSRF_VALUE = 'launch-tracker';
@@ -46,6 +49,15 @@ export function installAuth(app: FastifyInstance, options: AuthOptions): void {
   // Scoped to these routes: the API plugin registers its own cookie parser for /api/v1.
   void app.register(async auth => {
     await auth.register(fastifyCookie);
+    // Keyed by request.ip, which is the caller's own address only where the app trusts its proxy hop (Config.proxyHops).
+    await auth.register(fastifyRateLimit, {
+      max: AUTH_RATE_LIMIT,
+      timeWindow: 60_000,
+      errorResponseBuilder: (_request, { after }) =>
+        Object.assign(new Error(`Too many sign-in requests from this address: over ${String(AUTH_RATE_LIMIT)} a minute. Wait ${after} and try again.`), {
+          statusCode: 429,
+        }),
+    });
 
     // Entra answers with an HTML form post (response_mode=form_post).
     auth.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string', bodyLimit: 64 * 1024 }, (_request, body, done) => {
