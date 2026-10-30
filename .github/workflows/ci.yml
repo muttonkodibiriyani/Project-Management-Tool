@@ -1,6 +1,7 @@
 # Runs on every pull request, whatever its base, and on every commit to main. Each commit's image is
-# built once, scanned, and checked with the same scripts people run on Windows and Mac. On main, once
-# every job has passed, that image becomes the one tagged main, which the local check runs by default.
+# built once, scanned, driven end to end in a browser, and checked with the same scripts people run on
+# Windows and Mac. On main, once every job has passed, that image becomes the one tagged main, which the
+# local check runs by default.
 name: CI
 
 on:
@@ -53,6 +54,7 @@ jobs:
           cache-dependency-path: |
             gr8r-studio/package-lock.json
             server/package-lock.json
+            e2e/package-lock.json
       - name: gr8r-studio web app
         working-directory: gr8r-studio
         run: |
@@ -68,6 +70,11 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm run lint
           npm test
+      - name: End-to-end suite (type check, lint, format)
+        working-directory: e2e
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run lint
 
   scripts:
     name: Check scripts (ShellCheck, bash 3.2, PSScriptAnalyzer)
@@ -78,9 +85,12 @@ jobs:
         with:
           persist-credentials: false
       - name: ShellCheck
-        run: docker run --rm -v "$PWD/local:/mnt:ro" koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d /mnt/check.sh
-      - name: check.sh parses in bash 3.2, the version on a Mac
-        run: docker run --rm -v "$PWD/local:/mnt:ro" bash:3.2@sha256:b6252c62fc86114f93f02104a486c71e6569371d95950ea7479a2ffd6b47f16a bash -n /mnt/check.sh
+        run: docker run --rm -v "$PWD:/mnt:ro" koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d /mnt/local/check.sh /mnt/e2e/run.sh
+      - name: check.sh and e2e/run.sh parse in bash 3.2, the version on a Mac
+        run: |
+          for script in local/check.sh e2e/run.sh; do
+            docker run --rm -v "$PWD:/mnt:ro" bash:3.2@sha256:b6252c62fc86114f93f02104a486c71e6569371d95950ea7479a2ffd6b47f16a bash -n "/mnt/$script"
+          done
       - name: PSScriptAnalyzer, for PowerShell 7 and Windows PowerShell 5.1
         shell: pwsh
         run: |
@@ -189,7 +199,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Both lockfiles, including development dependencies
+      - name: Every lockfile, including development dependencies
         run: >-
           docker run --rm -v "$PWD:/src:ro" aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
           fs --scanners vuln,secret --include-dev-deps --severity HIGH,CRITICAL --exit-code 1 --no-progress
@@ -313,10 +323,49 @@ jobs:
         shell: pwsh
         run: ./local/check.ps1 -Image "$env:IMAGE@$env:DIGEST" -ExpectCommit $env:COMMIT
 
+  e2e:
+    name: End-to-end tests (${{ matrix.browser }})
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    env:
+      DIGEST: ${{ needs.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Drive this commit's image in ${{ matrix.browser }}
+        env:
+          BROWSER: ${{ matrix.browser }}
+        run: bash e2e/run.sh --image "$IMAGE@$DIGEST" --browser "$BROWSER"
+      # The report holds a trace, screenshot and video of every failed test. The suite uses synthetic data only.
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-report-${{ matrix.browser }}
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+          retention-days: 14
+          if-no-files-found: ignore
+
   promote:
     name: Tag the image main
     if: github.event_name == 'push'
-    needs: [lint-test, scripts, windows-powershell, codeql, gitleaks, checkov, trivy-fs, image, image-scan, local-check]
+    needs: [lint-test, scripts, windows-powershell, codeql, gitleaks, checkov, trivy-fs, image, image-scan, local-check, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
