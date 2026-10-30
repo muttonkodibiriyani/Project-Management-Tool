@@ -35,11 +35,12 @@ every option; the Windows script takes the same ones with a single dash (`-Image
 
 ## Develop
 
-Node.js 22 (see `gr8r-studio/.nvmrc`).
+Node.js 22 (see `gr8r-studio/.nvmrc`). Run each line from the repository's top folder.
 
 ```sh
-cd gr8r-studio && npm ci && npm run dev           # the web app on its own
-cd server && npm ci && npm run lint && npm test   # the server
+(cd gr8r-studio && npm ci && npm run dev)            # the web app on its own
+(cd gr8r-studio && npm ci && npm run build)          # build the web app, which the server's tests serve
+(cd server && npm ci && npm run lint && npm test)    # the server
 docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) -t launch-tracker .
 ```
 
