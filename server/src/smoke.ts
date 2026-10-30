@@ -90,6 +90,19 @@ export async function smoke({ url, expectDigest, expectCommit, waitSeconds }: Sm
 
   await checkWebApp(get, base, pass, fail);
 
+  try {
+    const api = await get('api/v1/me');
+    await api.arrayBuffer();
+    if (api.status === 401) pass('the API refuses callers who have not signed in');
+    else
+      fail(
+        `${base}api/v1/me answered ${api.status} without a session, not 401. The API must ask everyone to sign in; use an image built by CI.`,
+        'the API is open without sign-in',
+      );
+  } catch (error) {
+    fail(`The API at ${base}api/v1/me could not be reached (${reason(error)}).`, 'the API does not answer');
+  }
+
   if (failures.length === 0) print(`Smoke test passed. commit=${report.commit ?? ''} image=${report.imageDigest ?? ''}`);
   return finish(failures, print);
 }

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { buildApp } from './app.js';
 import { ConfigError, loadConfig, type Config } from './config.js';
 import { createContainer, createPool, databaseCheck, storageCheck } from './dependencies.js';
+import { expireIdempotencyKeys } from './api/rows.js';
 import { healthReporter } from './health.js';
 
 function stop(message: string): never {
@@ -28,7 +29,16 @@ const health = healthReporter([databaseCheck(pool, config.database), storageChec
   commit: config.commit,
   imageDigest: config.imageDigest,
 });
-const app = buildApp({ publicDir: config.publicDir, health, logger: true });
+const app = buildApp({ publicDir: config.publicDir, health, pool, logger: true });
+
+const HOUR_MS = 3_600_000;
+const expireKeys = () => {
+  expireIdempotencyKeys(pool).catch((error: unknown) => {
+    app.log.warn({ err: error }, 'old idempotency keys could not be removed; the next hourly run tries again');
+  });
+};
+expireKeys();
+setInterval(expireKeys, HOUR_MS).unref();
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
