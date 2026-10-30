@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import fastifyCookie from '@fastify/cookie';
+import fastifyRateLimit from '@fastify/rate-limit';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { allows, isAccess } from '../access/policy.js';
@@ -11,6 +13,8 @@ export interface ApiOptions {
 }
 
 const CSRF_VALUE = 'launch-tracker';
+/** Requests a minute for one session, or for one address without a session (API contract, 429). */
+export const RATE_LIMIT = 600;
 const UNAVAILABLE = new Set(['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', '57P01', '57P03', '53300']);
 
 interface AjvError {
@@ -90,6 +94,17 @@ function sendProblem(reply: FastifyReply, request: FastifyRequest, problem: ApiE
  */
 export async function api(app: FastifyInstance, { pool }: ApiOptions) {
   await app.register(fastifyCookie);
+  // Counted before the session is looked up, so a flood never reaches the database.
+  await app.register(fastifyRateLimit, {
+    max: RATE_LIMIT,
+    timeWindow: 60_000,
+    keyGenerator: request => {
+      const token = request.cookies[SESSION_COOKIE];
+      return token ? createHash('sha256').update(token).digest('base64url') : `ip:${request.ip}`;
+    },
+    errorResponseBuilder: (_request, { after }) =>
+      new ApiError(429, 'rate_limited', `Too many requests: over ${String(RATE_LIMIT)} a minute. Wait ${after} and try again.`),
+  });
 
   app.addHook('onRoute', route => {
     if (!isAccess(route.config?.access)) {

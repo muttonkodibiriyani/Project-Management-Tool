@@ -7,7 +7,7 @@ import type { AppRole } from '../access/policy.js';
 import { apiFixture, USERS, WS, type UserName } from '../testing/api.js';
 import { skipWithoutDatabase } from '../testing/database.js';
 import { SESSION_COOKIE } from './context.js';
-import { api } from './plugin.js';
+import { api, RATE_LIMIT } from './plugin.js';
 
 const MEMBERS = (Object.keys(USERS) as UserName[]).filter(name => name !== 'outsider');
 const problem = (response: LightMyRequestResponse) => response.json<{ code: string; detail: string }>();
@@ -120,6 +120,16 @@ test('the API, with real sessions in PostgreSQL', async t => {
       ['colour', 'invalid_type'],
       ['extra', 'unknown_field'],
     ]);
+  });
+
+  await t.test('over the rate limit a session gets 429 with Retry-After, and others carry on', async () => {
+    const cookie = await f.session(f.users.supply.id);
+    for (let sent = 0; sent < RATE_LIMIT; sent++) assert.equal((await f.call(null, 'GET', '/me', { headers: { cookie } })).statusCode, 200);
+    const limited = await f.call(null, 'GET', '/me', { headers: { cookie } });
+    assert.equal(limited.statusCode, 429);
+    assert.equal(problem(limited).code, 'rate_limited');
+    assert.ok(Number(limited.headers['retry-after']) > 0);
+    assert.equal((await f.call('supply', 'GET', '/me')).statusCode, 200);
   });
 
   await t.test('API answers are never cached', async () => {

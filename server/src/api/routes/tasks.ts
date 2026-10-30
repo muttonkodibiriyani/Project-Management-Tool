@@ -104,32 +104,36 @@ class TaskQuery {
 
   filter(field: string, list: string[]) {
     const p = (value: unknown) => this.param(value);
-    const text: Record<string, string> = { status: 't.status', priority: 't.priority', kind: 't.kind', followsUpGate: 't.follows_up_gate' };
-    const ids: Record<string, string> = {
-      assigneeId: 't.assignee_id',
-      createdBy: 't.created_by',
-      brandId: 't.brand_id',
-      followsUpId: 't.follows_up_id',
-      followsUpStoreId: 't.follows_up_store_id',
-    };
-    const due: Record<string, string> = {
-      overdue: `(t.due_date < current_date and not ${doneSql('t', 'p')})`,
-      today: 't.due_date = current_date',
-      week: 't.due_date between current_date and current_date + 7',
-      none: 't.due_date is null',
-    };
+    const text = new Map(Object.entries({ status: 't.status', priority: 't.priority', kind: 't.kind', followsUpGate: 't.follows_up_gate' }));
+    const ids = new Map(
+      Object.entries({
+        assigneeId: 't.assignee_id',
+        createdBy: 't.created_by',
+        brandId: 't.brand_id',
+        followsUpId: 't.follows_up_id',
+        followsUpStoreId: 't.follows_up_store_id',
+      }),
+    );
+    const due = new Map(
+      Object.entries({
+        overdue: `(t.due_date < current_date and not ${doneSql('t', 'p')})`,
+        today: 't.due_date = current_date',
+        week: 't.due_date between current_date and current_date + 7',
+        none: 't.due_date is null',
+      }),
+    );
     const [head, second, third] = field.split('.');
     const length = field.split('.').length;
-    const textColumn = text[field];
-    const idColumn = ids[field];
+    const textColumn = text.get(field);
+    const idColumn = ids.get(field);
     if (textColumn) this.where.push(`${textColumn} = any(${p(list)}::text[])`);
     else if (idColumn) this.where.push(`${idColumn} = any(${p(this.ids(field, list))}::uuid[])`);
     else if (field === 'labels') this.where.push(`t.labels && ${p(list)}::text[]`);
     else if (field === 'open') this.where.push(list.includes('true') ? `not ${doneSql('t', 'p')}` : doneSql('t', 'p'));
     else if (field === 'archived') return;
     else if (field === 'due') {
-      if (!list.every(value => due[value])) throw bad(field, 'takes overdue, today, week or none');
-      this.where.push(`(${list.map(value => due[value]).join(' or ')})`);
+      if (!list.every(value => due.has(value))) throw bad(field, 'takes overdue, today, week or none');
+      this.where.push(`(${list.map(value => due.get(value)).join(' or ')})`);
     } else if (head === 'values' && length === 2 && KEY.test(second ?? '')) this.where.push(`t.values ->> ${p(second)} = any(${p(list)}::text[])`);
     else if (head === 'brand' && length === 2 && KEY.test(second ?? '')) {
       this.where.push(`exists (select 1 from brand b where b.id = t.brand_id and b.values ->> ${p(second)} = any(${p(list)}::text[]))`);
@@ -147,16 +151,18 @@ class TaskQuery {
   orderBy(sort: string | undefined) {
     const field = sort?.replace(/^-/, '') ?? 'key';
     const direction = sort?.startsWith('-') ? 'desc' : 'asc';
-    const sorts: Record<string, string[]> = {
-      key: [`split_part(t.key, '-', 1)`, `nullif(substring(t.key from '[0-9]+$'), '')::int`],
-      title: ['lower(t.title)'],
-      dueDate: ['t.due_date'],
-      updatedAt: ['t.updated_at'],
-      sortOrder: ['t.sort_order'],
-      readiness: ['t.readiness'],
-    };
+    const sorts = new Map(
+      Object.entries({
+        key: [`split_part(t.key, '-', 1)`, `nullif(substring(t.key from '[0-9]+$'), '')::int`],
+        title: ['lower(t.title)'],
+        dueDate: ['t.due_date'],
+        updatedAt: ['t.updated_at'],
+        sortOrder: ['t.sort_order'],
+        readiness: ['t.readiness'],
+      }),
+    );
     const valueKey = field.startsWith('values.') ? field.slice('values.'.length) : undefined;
-    const expressions = sorts[field] ?? (valueKey !== undefined && KEY.test(valueKey) ? [`t.values ->> ${this.param(valueKey)}`] : undefined);
+    const expressions = sorts.get(field) ?? (valueKey !== undefined && KEY.test(valueKey) ? [`t.values ->> ${this.param(valueKey)}`] : undefined);
     if (!expressions)
       throw new ApiError(
         400,
@@ -408,15 +414,8 @@ export function tasks(plain: FastifyInstance, { pool }: ApiOptions, done: () => 
         query.filter(field, list);
       }
       query.where.push(`t.archived = ${query.param(archived)}`);
-      const order = query.orderBy(sort);
-      const rows = await readTasks(
-        pool,
-        request,
-        query.where.join(' and '),
-        query.params,
-        `order by ${order} limit ${String(limit + 1)} offset ${String(offset)}`,
-        includes(include),
-      );
+      const tail = `order by ${query.orderBy(sort)} limit ${query.param(limit + 1)} offset ${query.param(offset)}`;
+      const rows = await readTasks(pool, request, query.where.join(' and '), query.params, tail, includes(include));
       return page(rows, limit, () => offset + limit, renderTask);
     },
   );

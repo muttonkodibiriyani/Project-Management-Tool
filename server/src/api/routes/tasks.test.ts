@@ -203,6 +203,9 @@ test('tasks, launch lines, follow-ups, subtasks and dependencies', async t => {
     assert.equal((await f.call('viewer', 'GET', `${W}/tasks?filter[colour]=red`)).json<Problem>().code, 'bad_filter');
     assert.equal((await f.call('viewer', 'GET', `${W}/tasks/${line.id}?include=margin`)).statusCode, 400);
     assert.equal((await f.call('viewer', 'GET', `${W}/tasks?sort=colour`)).statusCode, 400);
+    assert.equal((await f.call('viewer', 'GET', `${W}/tasks?sort=constructor`)).statusCode, 400, 'no inherited keys');
+    assert.equal((await f.call('viewer', 'GET', `${W}/tasks?filter[due]=constructor`)).json<Problem>().code, 'bad_filter');
+    assert.equal((await f.call('viewer', 'GET', `${W}/tasks?filter[constructor]=x`)).json<Problem>().code, 'bad_filter');
   });
 
   await t.test('bulk edits one by one, or all or nothing', async () => {
