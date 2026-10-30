@@ -17,7 +17,7 @@ COPY server/package.json server/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY server/ ./
 RUN npm run build \
- && rm dist/*.test.js \
+ && rm -r dist/testing && find dist -name '*.test.js' -delete \
  && npm prune --omit=dev --no-audit --no-fund \
  && if find node_modules -name '*.node' | grep .; then echo 'Native add-ons would be built for the wrong platform.' >&2; exit 1; fi
 
