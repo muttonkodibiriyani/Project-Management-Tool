@@ -50,7 +50,7 @@ const auth: AuthOptions =
         }),
       }
     : { mode: 'dev', sessions, signingKey: authConfig.signingKey };
-const app = buildApp({ publicDir: config.publicDir, health, pool, auth, logger: true });
+const app = buildApp({ publicDir: config.publicDir, health, pool, auth, logger: true, proxyHops: config.proxyHops });
 
 const HOUR_MS = 3_600_000;
 const expireKeys = () => {

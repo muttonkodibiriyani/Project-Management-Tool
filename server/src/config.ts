@@ -24,6 +24,11 @@ export interface Config {
   database: DatabaseConfig;
   storage: StorageConfig;
   auth: AuthConfig;
+  /**
+   * Proxies in front of the app whose X-Forwarded-For entry is trusted: 1 in Azure Container Apps, whose
+   * ingress appends the caller's address; 0 elsewhere, where the header is ignored because anyone could set it.
+   */
+  proxyHops: number;
 }
 
 export class ConfigError extends Error {}
@@ -106,6 +111,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     database,
     storage,
     auth: loadAuthConfig(env, problems),
+    proxyHops: read('CONTAINER_APP_NAME') ? 1 : 0,
   };
   stopIf(problems, 'Launch Tracker');
   return config;
