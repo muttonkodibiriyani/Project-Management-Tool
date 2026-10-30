@@ -14,7 +14,26 @@ async function openSettings(page: Page, section: string): Promise<void> {
   await expect(page.getByRole('heading', { level: 1, name: section })).toBeVisible();
 }
 
-async function reload(page: Page): Promise<void> {
+interface Stored {
+  prefs?: Record<string, unknown>;
+  collapsed?: unknown;
+}
+
+/**
+ * Reloads once the app has written `expected` to storage. gr8r-studio saves on a 150 ms debounce
+ * and does not flush on unload, so a reload inside that window would lose the change.
+ */
+async function reload(page: Page, expected: Stored): Promise<void> {
+  await expect
+    .poll(async () => {
+      const raw = await page.evaluate(() => localStorage.getItem('gr8r.v2'));
+      const stored = (raw ? JSON.parse(raw) : {}) as Stored;
+      return {
+        ...(expected.prefs && { prefs: Object.fromEntries(Object.keys(expected.prefs).map(k => [k, stored.prefs?.[k]])) }),
+        ...('collapsed' in expected && { collapsed: stored.collapsed }),
+      };
+    })
+    .toEqual(expected);
   await page.reload();
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 }
@@ -34,7 +53,7 @@ test('theme, accent, density and motion apply at once and persist', async ({ app
   await expect(html).toHaveAttribute('data-density', 'compact');
   await choose(main.getByRole('button', { name: 'motion', exact: true }), 'Reduce motion');
 
-  await reload(page);
+  await reload(page, { prefs: { theme: 'dark', accent: 'teal', side: 'compact', density: 'compact', motion: 'reduce' } });
   await expect(html).toHaveAttribute('data-theme', 'dark');
   await expect(html).toHaveAttribute('data-side', 'compact');
   await expect(html).toHaveAttribute('data-density', 'compact');
@@ -47,7 +66,7 @@ test('theme, accent, density and motion apply at once and persist', async ({ app
 test('the sidebar collapses and stays collapsed after a reload', async ({ app: page }) => {
   await sidebar(page).getByRole('button', { name: 'Collapse sidebar' }).click();
   await expect(sidebar(page).getByRole('button', { name: 'Collapse sidebar' })).toBeHidden();
-  await reload(page);
+  await reload(page, { collapsed: true });
   await expect(sidebar(page).getByRole('button', { name: 'Collapse sidebar' })).toBeHidden();
 });
 
@@ -72,7 +91,7 @@ test('language and time zone are saved', async ({ app: page }) => {
   await openSettings(page, 'Date & time');
   await choose(page.getByRole('main').getByRole('button', { name: 'tz', exact: true }), '(GMT+08:00) Singapore');
 
-  await reload(page);
+  await reload(page, { prefs: { lang: 'English (UK)', tz: '(GMT+08:00) Singapore' } });
   await openSettings(page, 'Language');
   await expect(page.getByRole('main').getByRole('button', { name: 'lang', exact: true })).toHaveText('English (UK)');
   await openSettings(page, 'Date & time');
@@ -82,7 +101,7 @@ test('language and time zone are saved', async ({ app: page }) => {
 test('the home page setting picks the page the app opens on', async ({ app: page }) => {
   await openSettings(page, 'Preferences');
   await choose(page.getByRole('main').getByRole('button', { name: 'home', exact: true }), 'My Tasks');
-  await reload(page);
+  await reload(page, { prefs: { home: 'mytasks' } });
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('My Tasks');
 });
 

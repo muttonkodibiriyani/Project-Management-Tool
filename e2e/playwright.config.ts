@@ -25,7 +25,17 @@ export default defineConfig({
     video: 'retain-on-failure',
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
+    {
+      name: 'chromium',
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1440, height: 900 },
+        // Production serves HTTPS; the suite reaches the image over plain HTTP on a container name.
+        // Without this, Chromium logs that it ignored the Cross-Origin-Opener-Policy header, and the
+        // fixtures fail any test that logs a console error.
+        launchOptions: { args: [`--unsafely-treat-insecure-origin-as-secure=${new URL(baseURL).origin}`] },
+      },
+    },
     { name: 'firefox', use: { ...devices['Desktop Firefox'], viewport: { width: 1440, height: 900 } } },
   ],
 });
