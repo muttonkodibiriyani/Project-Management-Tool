@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import fastifyStatic from '@fastify/static';
-import Fastify, { LogController, type FastifyInstance } from 'fastify';
+import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import type pg from 'pg';
 import { api } from './api/plugin.js';
-import type { HealthReport } from './health.js';
+import { publicHealth, type HealthReport } from './health.js';
 
 /**
  * gr8r-studio makes no network calls of its own and loads only its own files plus Google Fonts.
@@ -39,7 +39,7 @@ export interface AppOptions {
   publicDir: string;
   health: () => Promise<HealthReport>;
   pool: pg.Pool;
-  logger?: boolean;
+  logger?: FastifyServerOptions['logger'];
 }
 
 export function buildApp({ publicDir, health, pool, logger = false }: AppOptions): FastifyInstance {
@@ -71,9 +71,12 @@ export function buildApp({ publicDir, health, pool, logger = false }: AppOptions
   // Liveness: answers while the process runs, whatever the state of the database and storage.
   app.get('/healthz', () => ({ status: 'ok' }));
 
-  app.get('/api/health', async (_request, reply) => {
+  // Readiness: anyone may ask, so the answer names each check and whether it passed. Why one failed,
+  // with hosts and users, goes only to the server log.
+  app.get('/api/health', async (request, reply) => {
     const report = await health();
-    return reply.code(report.status === 'ok' ? 200 : 503).send(report);
+    for (const check of report.checks) if (!check.ok) request.log.error({ check: check.name }, check.error ?? `${check.name} failed its check`);
+    return reply.code(report.status === 'ok' ? 200 : 503).send(publicHealth(report));
   });
 
   void app.register(api, { prefix: '/api/v1', pool });

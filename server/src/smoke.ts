@@ -9,7 +9,7 @@
  */
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import type { HealthReport } from './health.js';
+import type { PublicHealthReport } from './health.js';
 
 export interface SmokeOptions {
   url: string;
@@ -55,10 +55,10 @@ export async function smoke({ url, expectDigest, expectCommit, waitSeconds }: Sm
   }
   pass(`the app answers at ${base}`);
 
-  let report: HealthReport | undefined;
+  let report: PublicHealthReport | undefined;
   for (;;) {
     try {
-      report = (await (await get('api/health')).json()) as HealthReport;
+      report = (await (await get('api/health')).json()) as PublicHealthReport;
     } catch (error) {
       lastError = reason(error);
     }
@@ -70,8 +70,8 @@ export async function smoke({ url, expectDigest, expectCommit, waitSeconds }: Sm
     return finish(failures, print);
   }
   for (const check of report.checks) {
-    if (check.ok) pass(`${check.name} is reachable (${check.ms} ms)`);
-    else fail(check.error ?? `${check.name} failed its check.`, `${check.name} is unreachable`);
+    if (check.ok) pass(`${check.name} is reachable`);
+    else fail(`${check.name} is unreachable from the app. The app's log says why and what to fix.`, `${check.name} is unreachable`);
   }
 
   if (!report.commit) fail('The app reports no commit: the image was built without GIT_COMMIT. Use an image built by CI.', 'the commit is unknown');

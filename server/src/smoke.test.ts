@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { createServer, type AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -8,6 +10,7 @@ import type { HealthReport } from './health.js';
 import { smoke } from './smoke.js';
 
 const GR8R_DIST = fileURLToPath(new URL('../../gr8r-studio/dist/', import.meta.url));
+assert.ok(existsSync(join(GR8R_DIST, 'index.html')), `Build gr8r-studio first (cd gr8r-studio && npm ci && npm run build): ${GR8R_DIST} has no index.html.`);
 /** These tests never reach the database; a pool only connects on its first query. */
 const pool = new pg.Pool();
 const COMMIT = 'c'.repeat(40);
@@ -38,13 +41,13 @@ const healthy: HealthReport = {
 test('passes against a healthy app and ends with the commit and image digest', async () => {
   const { passed, lines } = await run(healthy, { expectDigest: DIGEST, expectCommit: COMMIT });
   assert.equal(passed, true, lines.join('\n'));
-  assert.ok(lines.includes('PASS Blob storage is reachable (3 ms)'));
+  assert.ok(lines.includes('PASS Blob storage is reachable'));
   assert.match(lines.join('\n'), /PASS the web app loads with its security policy \(page and \d+ files\)/);
   assert.ok(lines.includes('PASS the API refuses callers who have not signed in'));
   assert.equal(lines.at(-1), `Smoke test passed. commit=${COMMIT} image=${DIGEST}`);
 });
 
-test('names the dependency that is unreachable, in plain words', async () => {
+test('names the dependency that is unreachable, in plain words, and sends the reader to the app log', async () => {
   const error = 'Blob storage refused the connection at azurite:10000. Check that the storage service is running.';
   const { passed, lines } = await run({
     ...healthy,
@@ -55,7 +58,8 @@ test('names the dependency that is unreachable, in plain words', async () => {
     ],
   });
   assert.equal(passed, false);
-  assert.ok(lines.includes(`FAIL ${error}`));
+  assert.ok(lines.includes("FAIL Blob storage is unreachable from the app. The app's log says why and what to fix."));
+  assert.ok(!lines.some(line => line.includes('azurite:10000')), 'the reason stays in the app log');
   assert.equal(lines.at(-1), 'Smoke test failed: Blob storage is unreachable.');
 });
 

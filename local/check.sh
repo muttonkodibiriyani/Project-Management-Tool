@@ -19,6 +19,7 @@ NAME=launch-tracker-check
 say() { printf '==> %s\n' "$*"; }
 fail() {
   printf '\nCheck failed: %s\n' "$*" >&2
+  [ "$started" = 0 ] || printf 'Remove what this run started with: bash %s --stop\n' "$0" >&2
   exit 1
 }
 usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
@@ -28,6 +29,7 @@ port=8080
 engine=""
 expect_commit=""
 stop=0
+started=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --image | --port | --engine | --expect-commit)
@@ -103,6 +105,7 @@ say "Starting PostgreSQL and Blob storage (empty, with throwaway passwords)"
 db_password=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
 app_password=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
 storage_key=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+started=1
 "$engine" network create "$NAME" >/dev/null || fail "could not create the $NAME network; the $engine message above says why."
 "$engine" run -d --name "$NAME-postgres" --network "$NAME" --tmpfs /var/lib/postgresql/data \
   -e POSTGRES_USER=launchtracker -e POSTGRES_DB=launchtracker -e POSTGRES_PASSWORD="$db_password" \
@@ -142,7 +145,7 @@ set -- "dist/smoke.js" "http://$NAME-app:8080" --expect-digest "$digest" --wait 
 if ! "$engine" run --rm --name "$NAME-smoke" --network "$NAME" "$image" "$@"; then
   printf '\nThe app log:\n' >&2
   "$engine" logs --tail 40 "$NAME-app" >&2 || true
-  fail "the smoke test failed; the lines marked FAIL above say what to fix. Remove everything with: bash $0 --stop"
+  fail "the smoke test failed; the lines marked FAIL above say what to fix."
 fi
 curl -fsS -o /dev/null "http://127.0.0.1:$port/healthz" ||
   fail "the app answers inside $engine but not at http://127.0.0.1:$port. Check that nothing else (a VPN or firewall) holds that port."

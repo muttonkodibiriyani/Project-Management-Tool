@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { buildApp, CONTENT_SECURITY_POLICY } from './app.js';
-import type { HealthReport } from './health.js';
+import { publicHealth, type HealthReport } from './health.js';
 
 const GR8R_DIST = fileURLToPath(new URL('../../gr8r-studio/dist/', import.meta.url));
 /** These tests never reach the database; a pool only connects on its first query. */
@@ -28,13 +28,32 @@ test('/healthz answers without asking the database or storage', async () => {
   assert.deepEqual(response.json(), { status: 'ok' });
 });
 
-test('/api/health answers 200 when healthy and 503 with the reason when not', async () => {
+test('/api/health answers 200 when healthy and 503 when not, naming each check but never why it failed', async () => {
   const healthy = await app('ok').inject('/api/health');
   assert.equal(healthy.statusCode, 200);
-  assert.deepEqual(healthy.json(), report('ok'));
+  assert.deepEqual(healthy.json(), publicHealth(report('ok')));
   const failing = await app('failing').inject('/api/health');
   assert.equal(failing.statusCode, 503);
-  assert.equal(failing.json<HealthReport>().checks[0]?.error, 'PostgreSQL refused the connection at postgres:5432.');
+  assert.deepEqual(failing.json(), {
+    status: 'failing',
+    commit: 'c'.repeat(40),
+    imageDigest: `sha256:${'d'.repeat(64)}`,
+    checks: [{ name: 'PostgreSQL', ok: false }],
+  });
+  assert.doesNotMatch(failing.body, /postgres:5432|refused/);
+});
+
+test('/api/health writes why a check failed to the server log', async () => {
+  const lines: string[] = [];
+  const logged = buildApp({
+    publicDir: GR8R_DIST,
+    pool,
+    health: () => Promise.resolve(report('failing')),
+    logger: { level: 'error', stream: { write: (line: string) => lines.push(line) } },
+  });
+  await logged.inject('/api/health');
+  const entry = lines.map(line => JSON.parse(line) as { check?: string; msg?: string }).find(line => line.check === 'PostgreSQL');
+  assert.equal(entry?.msg, 'PostgreSQL refused the connection at postgres:5432.');
 });
 
 test('the web app is served with the security headers; only content-named files are cached for good', async () => {
