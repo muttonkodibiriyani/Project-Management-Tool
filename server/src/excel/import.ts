@@ -36,7 +36,8 @@ export interface Normalisation {
   cells: number;
 }
 
-export type ExceptionKind = 'unknown_value' | 'duplicate' | 'double_linked' | 'cleared_error' | 'unknown_brand' | 'unknown_vendor' | 'unknown_store';
+export type ExceptionKind =
+  'unknown_value' | 'duplicate' | 'double_linked' | 'cleared_error' | 'conflict' | 'unknown_brand' | 'unknown_vendor' | 'unknown_store';
 
 export interface ImportException {
   sheet: string;
@@ -62,6 +63,8 @@ export interface ImportContext {
   defaultYear?: number;
   /** Column letter → target, overriding the layout (wizard mapping table). */
   mapping?: Record<string, string>;
+  /** Review choices from an earlier preview, keyed by `field\0original`. */
+  normalisations?: Record<string, string>;
 }
 
 export interface PreparedImport {
@@ -153,6 +156,16 @@ class RowReader {
   private list(field: string, list: ListName, v: CellValue | undefined, notes: (note: string) => void): Value {
     const text = cellText(v);
     if (text === null || this.cleared(field, v)) return null;
+    const reviewed = this.ctx.normalisation(field, text);
+    if (reviewed !== undefined) {
+      this.out.record(field, text, reviewed);
+      if (reviewed === '(empty)') return null;
+      if (reviewed === '(moved to Notes)') {
+        notes(`${field}: ${text}`);
+        return null;
+      }
+      return reviewed;
+    }
     const m = matchList(VOCAB[list], text);
     if (!m) {
       notes(`${field}: ${text}`);
@@ -441,6 +454,7 @@ class Resolver {
   private readonly vendors = new Map<string, string>();
   private readonly knownVendors = new Set<string>();
   readonly defaultYear: number | undefined;
+  private readonly reviewed: Record<string, string>;
 
   constructor(
     ctx: ImportContext,
@@ -459,6 +473,11 @@ class Resolver {
       }
     }
     this.defaultYear = ctx.defaultYear;
+    this.reviewed = ctx.normalisations ?? {};
+  }
+
+  normalisation(field: string, original: string): string | undefined {
+    return this.reviewed[`${field}\u0000${original}`];
   }
 
   /** A store code or alias ('DH' for HILLS), or a market code. Unknown names are kept and listed. */

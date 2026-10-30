@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { ContainerClient } from '@azure/storage-blob';
 import fastifyCookie from '@fastify/cookie';
+import fastifyMultipart from '@fastify/multipart';
 import fastifyRateLimit from '@fastify/rate-limit';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { allows, isAccess } from '../access/policy.js';
 import { SESSION_COOKIE } from '../auth/plugin.js';
 import { loadCaller, loadWorkspace } from './context.js';
+import { UPLOAD_LIMIT } from './files.js';
 import { ApiError, type FieldError } from './problem.js';
 import { routes } from './routes/index.js';
 
@@ -97,6 +99,17 @@ function sendProblem(reply: FastifyReply, request: FastifyRequest, problem: ApiE
  */
 export async function api(app: FastifyInstance, { pool, blobs }: ApiOptions) {
   await app.register(fastifyCookie);
+  await app.register(fastifyMultipart, {
+    limits: {
+      files: 1,
+      fileSize: UPLOAD_LIMIT,
+      fields: 10,
+      parts: 11,
+      fieldNameSize: 100,
+      fieldSize: 20_000,
+      headerPairs: 200,
+    },
+  });
   // Counted before the session is looked up, so a flood never reaches the database.
   await app.register(fastifyRateLimit, {
     max: RATE_LIMIT,
