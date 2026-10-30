@@ -15,13 +15,13 @@ export function startOfWeek(d) {
 export function calendarHtml(ts, opt = {}) {
   const cur = parse(S.ui.calDate);
   const mode = S.ui.calMode;
-  const evs = opt.events ? D().events.filter(e => !opt.project || e.project === opt.project) : [];
+  const evs = opt.events ? [...D().events.filter(e => !opt.project || e.project === opt.project), ...(opt.extraEvents || [])] : [];
   const itemsOn = ds => [...evs.filter(e => e.date === ds).map(e => ({ ev: e })), ...ts.filter(t => t.due === ds).map(t => ({ t }))];
   const wdn = Array.from({ length: 7 }, (_, i) => WD[(i + S.prefs.weekStart) % 7]);
   const chip = it => {
     if (it.ev) {
       const p = proj(it.ev.project);
-      return `<button class="cev event" style="--c:${pColor(p)}" data-a="pop" data-pop="event" data-id="${it.ev.id}" title="${esc(it.ev.title)} · ${it.ev.time}"><span class="num faint" style="font-size:11px">${it.ev.time}</span><span class="trunc">${esc(it.ev.title)}</span></button>`;
+      return `<button class="cev event" style="--c:${pColor(p)}" ${it.ev.launchGate ? `data-a="go" data-r="project" data-id="${p.id}" data-tab="table"` : `data-a="pop" data-pop="event" data-id="${it.ev.id}"`} title="${esc(it.ev.title)} · ${it.ev.time}"><span class="num faint" style="font-size:11px">${it.ev.time}</span><span class="trunc">${esc(it.ev.title)}</span></button>`;
     }
     const t = it.t;
     const p = proj(t.project);
@@ -63,7 +63,7 @@ export function calendarHtml(ts, opt = {}) {
             .map(it => {
               if (it.ev) {
                 const p = proj(it.ev.project);
-                return `<button class="wcard event" style="--c:${pColor(p)}" data-a="pop" data-pop="event" data-id="${it.ev.id}"><span class="t"><span class="pdot" style="--c:${pColor(p)};border-radius:50%"></span>${esc(it.ev.title)}</span><span class="m">${ic('clock', 11)}${it.ev.time} · ${esc(p.name)}</span></button>`;
+                return `<button class="wcard event" style="--c:${pColor(p)}" ${it.ev.launchGate ? `data-a="go" data-r="project" data-id="${p.id}" data-tab="table"` : `data-a="pop" data-pop="event" data-id="${it.ev.id}"`}><span class="t"><span class="pdot" style="--c:${pColor(p)};border-radius:50%"></span>${esc(it.ev.title)}</span><span class="m">${ic('clock', 11)}${it.ev.time} · ${esc(p.name)}</span></button>`;
               }
               const t = it.t;
               const p = proj(t.project);

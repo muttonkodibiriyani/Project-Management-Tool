@@ -52,7 +52,8 @@ document.addEventListener('contextmenu', e => {
   if (el.dataset.ctx === 'column') S.ui.pop.key = el.dataset.key;
   render();
 });
-export const isChangeEl = el => el.matches('select, input[type=checkbox], input[type=radio], input[type=file], input[type=date]');
+export const isChangeEl = el =>
+  el.matches('select, input[type=checkbox], input[type=radio], input[type=file], input[type=date], input[type=number], input[type=color]');
 document.addEventListener('input', e => {
   const el = e.target;
   if (!el.dataset || !el.dataset.in || isChangeEl(el)) return;

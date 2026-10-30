@@ -4,6 +4,8 @@ import { ic } from '../core/icons.js';
 import { LABELS, PR, PRIOS, STATUSES } from '../core/constants.js';
 import { D, S, canSee, isOver, mem, pColor, proj, visibleProjects } from '../core/store.js';
 import { av, prIcon, stIcon } from '../ui/helpers.js';
+import { groupDefinition, valueForGroup } from '../features/launch-gates.js';
+import { groupLabel, gvPill, projectForViewKey, resolveLine, templateForProject } from '../features/launch-state.js';
 
 export const FIELDS = {
   status: { name: 'Status', icon: 'circle-dot', opts: () => STATUSES.map(s => ({ id: s.id, name: s.name, html: stIcon(s.id) })) },
@@ -139,6 +141,26 @@ export function groupTasks(ts, g) {
       { key: 'later', name: 'Later' },
       { key: 'nodate', name: 'No due date' },
     ].map(x => ({ ...x, html: ic('calendar', 14) }));
+  else if (g.startsWith('gate:') || g.startsWith('field:')) {
+    const project = proj(ts[0]?.project);
+    const template = templateForProject(project);
+    const definition = groupDefinition(g, template);
+    if (!definition) return [{ key: 'all', name: 'All tasks', html: '', tasks: ts }];
+    groups = [
+      ...(definition.values || []).map(value => ({
+        key: value.id,
+        name: value.name,
+        html: definition.kind === 'gate' ? gvPill({ display: value.name, done: value.done, tone: value.tone }, value) : '',
+      })),
+      { key: '__empty', name: 'No value', html: '' },
+      ...(definition.kind === 'gate' ? [{ key: '__na', name: 'Not applicable', html: '' }] : []),
+    ];
+    const store = definition.scope === 'store' ? project?.stores?.[0]?.code : null;
+    groups.forEach(group => {
+      group.tasks = ts.filter(line => valueForGroup(line, g, store, template, resolveLine) === group.key);
+    });
+    return groups.filter(group => group.tasks.length);
+  }
   groups.forEach(G => {
     G.tasks = ts.filter(t => {
       if (g === 'assignee') return (t.assignee || 'none') === G.key;
@@ -164,6 +186,10 @@ export function filterChips(key) {
 }
 export function viewToolbar(key, opt = {}) {
   const v = viewOf(key);
+  const currentGroup =
+    groupLabel(v.group, projectForViewKey(key)) ||
+    { status: 'Status', priority: 'Priority', assignee: 'Assignee', project: 'Project', due: 'Due date', none: 'None' }[v.group] ||
+    'None';
   const sortName = {
     manual: 'Manual',
     title: 'Title',
@@ -181,7 +207,7 @@ export function viewToolbar(key, opt = {}) {
     <div class="inwrap">${ic('search', 13)}<input class="input search-sm" id="vq-${key}" data-in="viewQ" data-key="${key}" placeholder="Search tasks" value="${esc(v.q)}" aria-label="Search tasks"></div>
     <button class="btn btn-ghost ${v.filters.length ? 'on' : ''}" data-a="pop" data-pop="filter" data-key="${key}">${ic('list-filter', 14)}Filter${v.filters.length ? ` <span class="badge accent" style="height:16px;padding:0 5px">${v.filters.length}</span>` : ''}</button>
     <button class="btn btn-ghost" data-a="pop" data-pop="sort" data-key="${key}">${ic('arrow-up-down', 14)}<span class="hide-m">Sort:</span> ${sortName}</button>
-    ${opt.group !== false ? `<button class="btn btn-ghost" data-a="pop" data-pop="group" data-key="${key}">${ic('rows-3', 14)}<span class="hide-m">Group:</span> ${{ status: 'Status', priority: 'Priority', assignee: 'Assignee', project: 'Project', due: 'Due date', none: 'None' }[v.group]}</button>` : ''}
+    ${opt.group !== false ? `<button class="btn btn-ghost" data-a="pop" data-pop="group" data-key="${key}">${ic('rows-3', 14)}<span class="hide-m">Group:</span> ${currentGroup}</button>` : ''}
     ${opt.cols ? `<button class="btn btn-ghost" data-a="pop" data-pop="cols" data-key="${key}">${ic('columns-3', 14)}Columns</button>` : ''}
     ${opt.extra || ''}
     <span class="sp"></span>

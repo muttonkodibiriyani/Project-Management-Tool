@@ -9,6 +9,8 @@ import { FIELDS, viewOf } from '../shell/view-engine.js';
 import { TCOLS } from '../views/table.js';
 import { startOfWeek } from '../views/calendar.js';
 import { ctxMenu } from './context-menu.js';
+import { gateState } from '../features/launch-gates.js';
+import { fieldForPop, gateForPop, gvPill, isLaunchProject, projectForViewKey, resolveLine, templateForProject } from '../features/launch-state.js';
 
 export function openPop(el, extra = {}) {
   const r = el.getBoundingClientRect();
@@ -20,6 +22,8 @@ export function openPop(el, extra = {}) {
     key: d.key,
     i: d.i != null ? +d.i : undefined,
     field: d.field,
+    gate: d.gate,
+    store: d.store,
     date: d.date,
     x: r.left,
     y: r.bottom + 4,
@@ -118,6 +122,44 @@ export function popHtml(p) {
     case 'status':
       inner = popList(STATUSES.map((s, i) => ({ id: s.id, name: s.name, html: stIcon(s.id), on: t?.status === s.id, kbd: i + 1 })));
       break;
+    case 'gate': {
+      const line = task(p.id);
+      const gate = gateForPop(p);
+      if (!line || !gate) break;
+      const state = gateState(line, gate, p.store || null, resolveLine);
+      inner =
+        `<div class="mh">${esc(gate.name)}${p.store ? ` · ${esc(p.store)}` : ''}<span class="r faint">${esc(gate.ownerTeam)}</span></div>` +
+        popList(
+          gate.values.map((value, index) => ({
+            id: value.id,
+            name: value.name,
+            html: gvPill({ display: value.name, done: value.done, tone: value.tone }, value),
+            on: state.valueId === value.id,
+            act: 'pickGateValue',
+            kbd: index < 9 ? index + 1 : null,
+          })),
+        );
+      style = 'width:300px';
+      break;
+    }
+    case 'launch-field': {
+      const line = task(p.id);
+      const field = fieldForPop(p);
+      if (!line || !field) break;
+      const current = line.fields?.[field.id];
+      inner =
+        `<div class="mh">${esc(field.name)}</div>` +
+        popList(
+          field.values.map(value => ({
+            id: value.id,
+            name: value.name,
+            html: `<span class="gv gray"><i></i>${esc(value.name)}</span>`,
+            on: current === value.id,
+            act: 'pickLaunchField',
+          })),
+        );
+      break;
+    }
     case 'priority':
       inner = popList(PRIOS.map(x => ({ id: x.id, name: x.name, html: prIcon(x.id), on: t?.priority === x.id })));
       break;
@@ -272,21 +314,56 @@ export function popHtml(p) {
     }
     case 'group': {
       const v = viewOf(p.key);
+      const project = projectForViewKey(p.key);
+      if (isLaunchProject(project)) {
+        const template = templateForProject(project);
+        inner = `<div class="mh">Group launch board by</div><button class="mi" data-a="setGroup" data-key="${p.key}" data-v="status">${ic('circle-dot', 15)}Launch status${v.group === 'status' ? `<span class="ck">${ic('check', 14)}</span>` : ''}</button>
+          <div class="msep"></div><div class="mh">Gates</div>${template.gates
+            .map(
+              gate =>
+                `<button class="mi" data-a="setGroup" data-key="${p.key}" data-v="gate:${gate.id}">${ic('list-checks', 15)}<span class="trunc">${esc(gate.name)}</span><span class="r faint">${esc(gate.ownerTeam)}</span>${v.group === `gate:${gate.id}` ? `<span class="ck">${ic('check', 14)}</span>` : ''}</button>`,
+            )
+            .join('')}<div class="msep"></div><div class="mh">Select fields</div>${template.fields
+            .filter(field => field.type === 'select')
+            .map(
+              field =>
+                `<button class="mi" data-a="setGroup" data-key="${p.key}" data-v="field:${field.id}">${ic('tags', 15)}${esc(field.name)}${v.group === `field:${field.id}` ? `<span class="ck">${ic('check', 14)}</span>` : ''}</button>`,
+            )
+            .join('')}`;
+        style = 'width:300px;max-height:min(620px,80vh);overflow:auto';
+      } else
+        inner =
+          `<div class="mh">Group by</div>` +
+          [
+            ['status', 'Status', 'circle-dot'],
+            ['priority', 'Priority', 'signal-high'],
+            ['assignee', 'Assignee', 'user'],
+            ['project', 'Project', 'folder'],
+            ['due', 'Due date', 'calendar'],
+            ['none', 'No grouping', 'minus'],
+          ]
+            .map(
+              ([k, n, i]) =>
+                `<button class="mi" data-a="setGroup" data-key="${p.key}" data-v="${k}">${ic(i, 15)}${n}${v.group === k ? `<span class="ck">${ic('check', 14)}</span>` : ''}</button>`,
+            )
+            .join('');
+      break;
+    }
+    case 'board-store': {
+      const project = projectForViewKey(p.key);
+      const v = viewOf(p.key);
+      if (!project) break;
       inner =
-        `<div class="mh">Group by</div>` +
-        [
-          ['status', 'Status', 'circle-dot'],
-          ['priority', 'Priority', 'signal-high'],
-          ['assignee', 'Assignee', 'user'],
-          ['project', 'Project', 'folder'],
-          ['due', 'Due date', 'calendar'],
-          ['none', 'No grouping', 'minus'],
-        ]
-          .map(
-            ([k, n, i]) =>
-              `<button class="mi" data-a="setGroup" data-key="${p.key}" data-v="${k}">${ic(i, 15)}${n}${v.group === k ? `<span class="ck">${ic('check', 14)}</span>` : ''}</button>`,
-          )
-          .join('');
+        `<div class="mh">Store</div>` +
+        popList(
+          (project.stores || []).map(store => ({
+            id: store.code,
+            name: `${store.code} · ${store.name}`,
+            html: ic('store', 14),
+            on: (v.store || project.stores[0]?.code) === store.code,
+            act: 'setBoardStore',
+          })),
+        );
       break;
     }
     case 'cols': {

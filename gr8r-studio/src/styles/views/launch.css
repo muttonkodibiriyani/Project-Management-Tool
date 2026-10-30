@@ -1,0 +1,221 @@
+/* ============================================================
+   LAUNCH GATES, READINESS AND TEMPLATE EDITOR
+   ============================================================ */
+.gv {
+  --gv-color: var(--gray);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--gv-color) 12%, var(--surface));
+  color: color-mix(in srgb, var(--gv-color) 82%, var(--text));
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.gv i {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--gv-color);
+}
+.gv.green {
+  --gv-color: var(--green);
+}
+.gv.amber {
+  --gv-color: var(--amber);
+}
+.gv.red {
+  --gv-color: var(--red);
+}
+.gv.blue {
+  --gv-color: var(--blue);
+}
+.gv.violet {
+  --gv-color: var(--violet);
+}
+.gv.teal {
+  --gv-color: var(--teal);
+}
+.gv.rose {
+  --gv-color: var(--rose);
+}
+.gv.orange {
+  --gv-color: var(--orange);
+}
+.gv.gray,
+.gv.na {
+  --gv-color: var(--gray);
+}
+.gv.na {
+  color: var(--text-3);
+  background: var(--surface-3);
+  font-style: italic;
+}
+.gv.done {
+  color: color-mix(in srgb, var(--green) 85%, var(--text));
+}
+.bc {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  border-radius: 999px;
+  background: var(--bc);
+  color: #34312d;
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.rdy {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 86px;
+  font-size: var(--fs-2xs);
+}
+.rdy > span {
+  width: 44px;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+.rdy > span > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+}
+.rdy b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.rdy.compact {
+  min-width: 72px;
+  margin-left: 4px;
+}
+.rdy.compact > span {
+  width: 28px;
+}
+.launch-grid .tbl td {
+  height: 40px;
+}
+.launch-grid .tbl th {
+  top: 0;
+  height: 42px;
+}
+.launch-card {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 8px;
+  text-align: left;
+}
+.launch-board .bcol.not-applicable {
+  opacity: 0.78;
+}
+.launch-board .bcol-h > .gv {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.set-in:has(.template-summary) {
+  max-width: 1120px;
+}
+.settings-tabs {
+  margin-top: 18px;
+  border-bottom: 1px solid var(--border);
+}
+.template-table {
+  margin-top: 18px;
+  overflow-x: auto;
+}
+.template-table .perm-t {
+  min-width: 780px;
+}
+.template-table tr.selected td {
+  background: var(--accent-soft);
+}
+.linkbtn {
+  color: var(--accent);
+  font-weight: 500;
+  text-align: left;
+}
+.gate-editor {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+.template-values {
+  margin-top: 20px;
+}
+.template-values h3 {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+.template-value {
+  grid-template-columns: 16px minmax(140px, 1fr) 120px auto auto auto;
+  gap: 10px;
+}
+.template-check {
+  gap: 7px;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.template-value-actions {
+  gap: 2px;
+}
+.template-field .row,
+.template-status,
+.template-legend {
+  gap: 10px;
+}
+.template-field .input {
+  width: 160px;
+}
+.template-status {
+  grid-template-columns: minmax(180px, 1fr) 180px;
+}
+.template-legend {
+  grid-template-columns: 90px minmax(220px, 1fr) 100px 140px;
+}
+.template-legend input[type='color'] {
+  min-width: 92px;
+  padding: 3px;
+}
+
+@media (max-width: 900px) {
+  .template-value {
+    grid-template-columns: 16px minmax(150px, 1fr) 120px;
+  }
+  .template-value .template-check,
+  .template-value-actions {
+    grid-column: 2 / -1;
+  }
+}
+
+@media (max-width: 640px) {
+  .settings-grid,
+  .template-status,
+  .template-legend {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .template-field,
+  .template-field > .row {
+    display: flex;
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
