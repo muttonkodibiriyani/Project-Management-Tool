@@ -67,7 +67,7 @@ function Test-Engine([string]$Candidate) {
 }
 
 function Clear-Check {
-  & $Engine rm -f -v "$Name-smoke" "$Name-app" "$Name-storage" "$Name-postgres" *> $null
+  & $Engine rm -f -v "$Name-smoke" "$Name-app" "$Name-migrate" "$Name-storage" "$Name-postgres" *> $null
   & $Engine network rm $Name *> $null
 }
 
@@ -144,9 +144,10 @@ foreach ($ref in @($Image, $PostgresImage, $AzuriteImage)) {
 }
 
 Show-Step 'Starting PostgreSQL and Blob storage (empty, with throwaway passwords)'
-$bytes = New-Object byte[] 48
+$bytes = New-Object byte[] 64
 [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
 $dbPassword = -join ($bytes[0..15] | ForEach-Object { $_.ToString('x2') })
+$appPassword = -join ($bytes[48..63] | ForEach-Object { $_.ToString('x2') })
 $storageKey = [Convert]::ToBase64String($bytes, 16, 32)
 & $Engine network create $Name | Out-Null
 if ($LASTEXITCODE -ne 0) { Show-Failure "could not create the $Name network; the $Engine message above says why." }
@@ -170,10 +171,20 @@ while ($true) {
   $waited++
 }
 
+# As in Azure: the migration runs as the schema owner, and the app as lt_app, which cannot change the schema.
+Show-Step 'Creating the database tables'
+& $Engine exec "$Name-postgres" psql -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U launchtracker -d launchtracker `
+  -c "create role lt_app login password '$appPassword'" | Out-Null
+if ($LASTEXITCODE -ne 0) { Show-Failure "could not create the app's database role; the PostgreSQL message above says why. Remove everything with: $StopCommand" }
+& $Engine run --rm --name "$Name-migrate" --network $Name `
+  -e "PGHOST=$Name-postgres" -e PGDATABASE=launchtracker -e PGUSER=launchtracker -e "PGPASSWORD=$dbPassword" -e PGSSLMODE=disable `
+  $Image dist/migrate.js
+if ($LASTEXITCODE -ne 0) { Show-Failure "the migration failed; the message above says why. Remove everything with: $StopCommand" }
+
 Show-Step 'Starting Launch Tracker'
 $storage = "DefaultEndpointsProtocol=http;AccountName=launchtracker;AccountKey=$storageKey;BlobEndpoint=http://$Name-storage:10000/launchtracker;"
 & $Engine run -d --name "$Name-app" --network $Name -p "127.0.0.1:${Port}:8080" `
-  -e "PGHOST=$Name-postgres" -e PGDATABASE=launchtracker -e PGUSER=launchtracker -e "PGPASSWORD=$dbPassword" -e PGSSLMODE=disable `
+  -e "PGHOST=$Name-postgres" -e PGDATABASE=launchtracker -e PGUSER=lt_app -e "PGPASSWORD=$appPassword" -e PGSSLMODE=disable `
   -e "BLOB_CONNECTION_STRING=$storage" -e BLOB_CONTAINER=launch-tracker -e "IMAGE_DIGEST=$digest" `
   $Image | Out-Null
 if ($LASTEXITCODE -ne 0) { Show-Failure "could not start Launch Tracker; the $Engine message above says why." }

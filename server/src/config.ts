@@ -26,8 +26,9 @@ export interface Config {
 
 export class ConfigError extends Error {}
 
-export function loadConfig(env: NodeJS.ProcessEnv): Config {
-  const problems: string[] = [];
+type Problems = string[];
+
+function reader(env: NodeJS.ProcessEnv, problems: Problems) {
   const read = (name: string) => env[name]?.trim() ?? '';
   const required = (name: string, what: string) => {
     const value = read(name);
@@ -46,24 +47,39 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     if (value && !pattern.test(value)) problems.push(`${name} must be ${what}, not "${value}"`);
     return value || null;
   };
+  return { read, required, port, matching };
+}
 
+function readDatabase(env: NodeJS.ProcessEnv, problems: Problems, clientId: () => string): DatabaseConfig {
+  const { read, required, port } = reader(env, problems);
   const password = read('PGPASSWORD');
-  const connectionString = read('BLOB_CONNECTION_STRING');
-  const clientId =
-    password && connectionString ? '' : required('AZURE_CLIENT_ID', 'the managed identity that signs in where PGPASSWORD or BLOB_CONNECTION_STRING is absent');
-
   const sslMode = read('PGSSLMODE') || 'verify-full';
   if (sslMode !== 'verify-full' && sslMode !== 'disable')
     problems.push(`PGSSLMODE must be verify-full, or disable for a database on this machine, not "${sslMode}"`);
-
-  const database: DatabaseConfig = {
+  return {
     host: required('PGHOST', 'the PostgreSQL server name'),
     port: port('PGPORT', 5432),
     database: required('PGDATABASE', 'the database name'),
     user: required('PGUSER', 'the database user, or the managed identity name in Azure'),
     tls: sslMode !== 'disable',
-    ...(password ? { password } : { clientId }),
+    ...(password ? { password } : { clientId: clientId() }),
   };
+}
+
+function stopIf(problems: Problems, what: string) {
+  if (problems.length) throw new ConfigError(`${what} cannot start:\n  - ${problems.join('\n  - ')}\nSet these in the environment and start it again.`);
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv): Config {
+  const problems: Problems = [];
+  const { read, required, port, matching } = reader(env, problems);
+
+  const connectionString = read('BLOB_CONNECTION_STRING');
+  const clientId =
+    read('PGPASSWORD') && connectionString
+      ? ''
+      : required('AZURE_CLIENT_ID', 'the managed identity that signs in where PGPASSWORD or BLOB_CONNECTION_STRING is absent');
+  const database = readDatabase(env, problems, () => clientId);
 
   const container = required('BLOB_CONTAINER', 'the Blob container for uploaded files');
   let storage: StorageConfig = { container, connectionString };
@@ -83,6 +99,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     database,
     storage,
   };
-  if (problems.length) throw new ConfigError(`Launch Tracker cannot start:\n  - ${problems.join('\n  - ')}\nSet these in the environment and start it again.`);
+  stopIf(problems, 'Launch Tracker');
   return config;
+}
+
+/** The migrate job needs only the database: PG* settings, or AZURE_CLIENT_ID for its managed identity in Azure. */
+export function loadDatabaseConfig(env: NodeJS.ProcessEnv): DatabaseConfig {
+  const problems: Problems = [];
+  const { required } = reader(env, problems);
+  const database = readDatabase(env, problems, () => required('AZURE_CLIENT_ID', 'the managed identity that signs in where PGPASSWORD is absent'));
+  stopIf(problems, 'The Launch Tracker migration');
+  return database;
 }
