@@ -82,6 +82,14 @@ test('migrations build the whole schema in an empty database, and a second run a
        from information_schema.columns where table_name = 'import_job' and column_name = 'store_map'`,
   );
   assert.deepEqual(storeMap, [{ type: 'jsonb', nullable: 'NO', fallback: "'{}'::jsonb" }]);
+  const job = await owner.query(`
+    with w as (insert into workspace (slug, name) values ('synthetic-ws', 'Synthetic') returning id),
+         u as (insert into app_user (email, name) values ('importer@example.test', 'Importer') returning id),
+         f as (insert into file (workspace_id, name, content_type, size_bytes, sha256, blob_container, blob_name, uploaded_by)
+               select w.id, 'synthetic.xlsx', 'application/octet-stream', 0, '', 'imports', 'synthetic/blob', u.id from w, u returning id, workspace_id, uploaded_by)
+    insert into import_job (workspace_id, file_id, created_by) select workspace_id, id, uploaded_by from f returning store_map`);
+  assert.deepEqual(job.rows, [{ store_map: {} }]);
+  await assert.rejects(owner.query("update import_job set store_map = '[]'::jsonb"), { code: '23514' });
 });
 
 test('every update moves a row onto the change feed', async t => {
