@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ConfigError, loadConfig } from './config.js';
+import { ConfigError, loadConfig, loadDatabaseConfig } from './config.js';
 
 const LOCAL = {
   PGHOST: 'postgres',
@@ -86,5 +86,33 @@ test('a malformed value is refused and shown', () => {
   assert.throws(
     () => loadConfig({ ...LOCAL, BLOB_CONNECTION_STRING: '', AZURE_CLIENT_ID: 'id', BLOB_ACCOUNT_URL: 'http://plain' }),
     /BLOB_ACCOUNT_URL must be an https:\/\/ URL/,
+  );
+});
+
+test('the migrate job needs only the database settings', () => {
+  const { PGHOST, PGDATABASE, PGUSER, PGPASSWORD, PGSSLMODE } = LOCAL;
+  assert.deepEqual(loadDatabaseConfig({ PGHOST, PGDATABASE, PGUSER, PGPASSWORD, PGSSLMODE }), {
+    host: 'postgres',
+    port: 5432,
+    database: 'launchtracker',
+    user: 'launchtracker',
+    tls: false,
+    password: 'synthetic-password',
+  });
+  assert.deepEqual(loadDatabaseConfig({ PGHOST: 'launch.postgres.database.azure.com', PGDATABASE, PGUSER: 'id-lt-migrate', AZURE_CLIENT_ID: 'mi' }), {
+    host: 'launch.postgres.database.azure.com',
+    port: 5432,
+    database: 'launchtracker',
+    user: 'id-lt-migrate',
+    tls: true,
+    clientId: 'mi',
+  });
+  assert.throws(
+    () => loadDatabaseConfig({ PGHOST }),
+    (error: unknown) =>
+      error instanceof ConfigError &&
+      error.message.startsWith('The Launch Tracker migration cannot start') &&
+      ['AZURE_CLIENT_ID', 'PGDATABASE', 'PGUSER'].every(name => error.message.includes(name)) &&
+      !error.message.includes('BLOB'),
   );
 });

@@ -19,6 +19,18 @@ export interface HealthReport {
   checks: CheckResult[];
 }
 
+/** What /api/health tells anyone who asks: no hosts, users, identities or driver errors. */
+export interface PublicHealthReport {
+  status: HealthReport['status'];
+  commit: string | null;
+  imageDigest: string | null;
+  checks: { name: string; ok: boolean }[];
+}
+
+export function publicHealth({ status, commit, imageDigest, checks }: HealthReport): PublicHealthReport {
+  return { status, commit, imageDigest, checks: checks.map(({ name, ok }) => ({ name, ok })) };
+}
+
 export interface HealthOptions {
   commit: string | null;
   imageDigest: string | null;

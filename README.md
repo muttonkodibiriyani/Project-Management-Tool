@@ -35,13 +35,26 @@ every option; the Windows script takes the same ones with a single dash (`-Image
 
 ## Develop
 
-Node.js 22 (see `gr8r-studio/.nvmrc`).
+Node.js 22 (see `gr8r-studio/.nvmrc`). Run each line from the repository's top folder.
 
 ```sh
-cd gr8r-studio && npm ci && npm run dev           # the web app on its own
-cd server && npm ci && npm run lint && npm test   # the server
+(cd gr8r-studio && npm ci && npm run dev)            # the web app on its own
+(cd gr8r-studio && npm ci && npm run build)          # build the web app, which the server's tests serve
+(cd server && npm ci && npm run lint && npm test)    # the server
 docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) -t launch-tracker .
 ```
+
+The database tests need a throwaway PostgreSQL 16 that they may create databases and roles in; without
+one they are skipped locally (CI always runs them):
+
+```sh
+docker run -d --name lt-test-postgres -p 127.0.0.1:55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
+cd server && TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres npm test
+```
+
+Schema changes are new numbered files in `server/src/db/migrations/` (never an edit of one that has
+shipped). The image applies them with `dist/migrate.js` as the schema owner before the app starts;
+`npm run migrate` does the same with the `PG*` settings of the shell. Running it again applies nothing.
 
 Every pull request runs lint, type checks and tests; ShellCheck and PSScriptAnalyzer on the check
 scripts; CodeQL, gitleaks over the whole history, Checkov and Trivy; then builds the image for amd64
