@@ -1,5 +1,6 @@
 /* ---------- seed data ---------- */
 import { dOff, minsAgo, uid } from '../core/utils.js';
+import { createGccTemplate } from '../features/launch-gates.js';
 
 export function seed() {
   const members = [
@@ -234,6 +235,32 @@ export function seed() {
       milestones: [],
       last: 26000,
     },
+    {
+      id: 'p8',
+      key: 'GCC',
+      name: 'GCC pilot launch',
+      icon: 'store',
+      color: 'teal',
+      status: 'active',
+      team: 'product',
+      lead: 'm1',
+      due: dOff(90),
+      start: dOff(-14),
+      fav: true,
+      members: ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'],
+      desc: 'Synthetic pilot data for a two-store launch using the GCC store launch template.',
+      kind: 'launch',
+      templateId: 'gcc-store-launch',
+      stores: [
+        { code: 'TST', name: 'Test Centre', opening: dOff(60), role: 'launching' },
+        { code: 'NXT', name: 'Next Mall', opening: dOff(90), role: 'launching' },
+      ],
+      milestones: [
+        { name: 'TST store opening', date: dOff(60), store: 'TST' },
+        { name: 'NXT store opening', date: dOff(90), store: 'NXT' },
+      ],
+      last: 8,
+    },
   ];
   let n = 0;
   const T = [];
@@ -371,6 +398,60 @@ export function seed() {
   t('p7', 'Spring release hero video', 'done', 'm5', 'medium', -24, ['content']);
   // Customer portal (restricted)
   t('p6', 'Billing API contract', 'todo', 'm6', 'high', 30, ['backend']);
+  // GCC store launch (synthetic data only)
+  const launchGates = (listing = { TST: 'yes', NXT: 'yes' }) => ({
+    listing,
+    'vendor-comms': { TST: 'sent', NXT: 'to-send' },
+    'floor-plan': { TST: 'sent', NXT: 'pending' },
+    vpa: 'signed',
+    registration: 'registered',
+    'marketing-ok': 'ok',
+    'vendor-setup': 'done',
+    icf: 'received',
+    schematics: 'approved',
+    fixture: { TST: 'gondola', NXT: 'wall' },
+    'purchase-order': { TST: 'released', NXT: 'pending-prc' },
+    delivery: { TST: 'scheduled', NXT: 'scheduled' },
+    'vm-install': { TST: 'done', NXT: 'graphic-missing' },
+    'at-launch': { TST: 'yes', NXT: 'plus-30' },
+  });
+  const launchFields = (brandCode, zone, category = 'skincare') => ({
+    'brand-code': brandCode,
+    zone,
+    'main-category': category,
+    from: brandCode === 'purple' || brandCode === 'blue' ? 'ulta-us' : 'local',
+    'market-status': 'new-to-ub',
+    'internal-category': brandCode === 'yellow' ? 'local-founder' : 'korean',
+    'eighty-brands': 'yes',
+    exclusivity: brandCode === 'purple' ? 'yes' : 'non-exclusive',
+  });
+  t('p8', 'Nova Botanics · Prestige skincare', 'progress', 'm1', 'high', 60, [], {
+    launchStatus: 'setting-up',
+    fields: launchFields('yellow', 'prestige'),
+    gates: launchGates(),
+  });
+  const primaryLineId = T.at(-1).id;
+  t('p8', 'Aster Beauty · Korean beauty', 'review', 'm2', 'medium', 60, [], {
+    launchStatus: 'ready-for-po',
+    fields: launchFields('purple', 'korean-beauty'),
+    gates: launchGates(),
+  });
+  t('p8', 'Orbit Color · Beauty', 'backlog', 'm5', 'low', 90, [], {
+    launchStatus: 'dropped',
+    fields: launchFields('grey', 'beauty', 'make-up'),
+    gates: launchGates(),
+  });
+  t('p8', 'Cedar Labs · Wellness', 'todo', 'm3', 'medium', 90, [], {
+    launchStatus: 'confirmed',
+    fields: launchFields('blue', 'wellness', 'wellness'),
+    gates: launchGates({ TST: 'no', NXT: 'yes' }),
+  });
+  t('p8', 'Nova Botanics · Impulse', 'progress', 'm1', 'medium', 60, [], {
+    launchStatus: 'setting-up',
+    doubleOf: primaryLineId,
+    fields: launchFields('yellow', 'impulse'),
+    gates: launchGates(),
+  });
 
   const tk = id => T.find(x => x.id === id);
   // completed metadata
@@ -513,6 +594,7 @@ export function seed() {
     notifs,
     files,
     events,
+    templates: [createGccTemplate()],
     projOrder: projects.map(p => p.id),
     savedViews: [{ id: 'v1', project: 'p1', name: 'High priority', type: 'list', filters: [{ f: 'priority', op: 'is', v: ['urgent', 'high'] }] }],
     recentSearches: ['homepage', 'Sarah', 'wireframes'],

@@ -13,6 +13,8 @@ import { viewOf } from '../shell/view-engine.js';
 import { TEMPLATES, closeModal, openModal } from '../overlays/modals.js';
 import { closePop, openPop, tgt } from '../overlays/popovers.js';
 import { strengthMeter } from '../pages/settings.js';
+import { gateById, setGateValue, setGroupValue } from '../features/launch-gates.js';
+import { fieldForPop, gateForPop, isLaunchProject, templateForProject, templatesList } from '../features/launch-state.js';
 
 export const A = {},
   IN = {},
@@ -168,7 +170,7 @@ A.go = el => {
   const p = {};
   if (el.dataset.id) p.id = el.dataset.id;
   if (el.dataset.tab) p.tab = el.dataset.tab;
-  else if (r === 'project') p.tab = S.prefs.defaultTab || 'board';
+  else if (r === 'project') p.tab = isLaunchProject(proj(p.id)) ? 'table' : S.prefs.defaultTab || 'board';
   if (el.dataset.sec) p.sec = el.dataset.sec;
   S.ui.palette = null;
   const tabOnly = r === 'project' && S.ui.route === 'project' && S.ui.params.id === p.id;
@@ -180,7 +182,10 @@ A.back = () => {
   else go('home');
 };
 A.reload = () => render();
-A.openProject = el => go('project', { id: el.dataset.id, tab: S.prefs.defaultTab || 'board' });
+A.openProject = el => {
+  const project = proj(el.dataset.id);
+  go('project', { id: el.dataset.id, tab: isLaunchProject(project) ? 'table' : S.prefs.defaultTab || 'board' });
+};
 A.set = el => {
   const k = el.dataset.k;
   let v = el.dataset.v;
@@ -347,6 +352,54 @@ A.popToggleDep = el => {
   const t = task(p.id);
   const v = el.dataset.v;
   updateTask(p.id, { deps: t.deps.includes(v) ? t.deps.filter(x => x !== v) : [...t.deps, v] });
+};
+A.pickGateValue = el => {
+  const pop = S.ui.pop;
+  const line = task(pop?.id);
+  const gate = pop && gateForPop(pop);
+  if (!line || !gate) {
+    S.ui.pop = null;
+    render();
+    toast("That gate isn't available any more. Refresh the launch and pick another gate.", { kind: 'err' });
+    return;
+  }
+  const valueId = el.dataset.v;
+  S.ui.pop = null;
+  if (
+    mutate(() => {
+      setGateValue(line, gate, pop.store || null, valueId);
+      logAct('changed gate on', line, `${gate.name} to ${gate.values.find(value => value.id === valueId)?.name}`);
+    })
+  )
+    toast(`${gate.name} on ${line.key} set to ${gate.values.find(value => value.id === valueId)?.name}.`);
+};
+A.pickLaunchField = el => {
+  const pop = S.ui.pop;
+  const line = task(pop?.id);
+  const field = pop && fieldForPop(pop);
+  const project = line && proj(line.project);
+  const template = templateForProject(project);
+  if (!line || !field || !template) {
+    S.ui.pop = null;
+    render();
+    toast("That field isn't available any more. Refresh the launch and pick another field.", { kind: 'err' });
+    return;
+  }
+  S.ui.pop = null;
+  const valueId = el.dataset.v;
+  if (
+    mutate(() => {
+      setGroupValue(line, `field:${field.id}`, null, valueId, template);
+      logAct('changed field on', line, `${field.name} to ${field.values.find(value => value.id === valueId)?.name}`);
+    })
+  )
+    toast(`${field.name} on ${line.key} set to ${field.values.find(value => value.id === valueId)?.name}.`);
+};
+A.setBoardStore = el => {
+  viewOf(el.dataset.key).store = el.dataset.v;
+  S.ui.pop = null;
+  save();
+  render();
 };
 A.popMonth = el => {
   const p = S.ui.pop;
@@ -999,7 +1052,12 @@ A.setSortDir = el => {
   render();
 };
 A.setGroup = el => {
-  viewOf(el.dataset.key).group = el.dataset.v;
+  const view = viewOf(el.dataset.key);
+  view.group = el.dataset.v;
+  const project = proj(projectFromKey(el.dataset.key));
+  const template = templateForProject(project);
+  const gate = template && el.dataset.v.startsWith('gate:') ? gateById(template, el.dataset.v.slice(5)) : null;
+  if (gate?.scope === 'store') view.store ||= project.stores?.[0]?.code;
   S.ui.pop = null;
   save();
   render();
@@ -1026,6 +1084,108 @@ A.resetCols = el => {
   S.ui.pop = null;
   save();
   render();
+};
+
+/* Templates & fields */
+const activeTemplate = () => templatesList().find(template => template.id === S.ui.templateId) || templatesList()[0];
+const moveItem = (items, id, delta) => {
+  const index = items.findIndex(item => item.id === id);
+  const next = index + delta;
+  if (index < 0 || next < 0 || next >= items.length) return false;
+  const [item] = items.splice(index, 1);
+  items.splice(next, 0, item);
+  return true;
+};
+const saveTemplateChange = (label, change) => {
+  if (mutate(change)) toast(`Saved ${label}.`);
+};
+A.editTemplateGate = el => {
+  S.ui.templateGate = el.dataset.id;
+  render();
+};
+A.moveTemplateGate = el => {
+  const template = activeTemplate();
+  const gate = gateById(template, el.dataset.id);
+  if (gate) saveTemplateChange(gate.name, () => moveItem(template.gates, gate.id, +el.dataset.d));
+};
+A.moveTemplateValue = el => {
+  const gate = gateById(activeTemplate(), el.dataset.gate);
+  const value = gate?.values.find(item => item.id === el.dataset.value);
+  if (value) saveTemplateChange(gate.name, () => moveItem(gate.values, value.id, +el.dataset.d));
+};
+A.addTemplateValue = el => {
+  const gate = gateById(activeTemplate(), el.dataset.gate);
+  if (!gate) return;
+  let suffix = '';
+  let index = 1;
+  while (gate.values.some(value => value.id === `unspecified${suffix}`)) suffix = `-${++index}`;
+  saveTemplateChange(gate.name, () =>
+    gate.values.push({ id: `unspecified${suffix}`, name: index === 1 ? 'Unspecified' : `Unspecified ${index}`, tone: 'gray', done: false }),
+  );
+};
+BLUR.templateGateBlur = el => {
+  const gate = gateById(activeTemplate(), el.dataset.gate);
+  const value = el.value.trim();
+  if (gate && value && gate[el.dataset.f] !== value) saveTemplateChange(value, () => (gate[el.dataset.f] = value));
+};
+IN.templateGateChange = el => {
+  const gate = gateById(activeTemplate(), el.dataset.gate);
+  if (!gate) return;
+  const field = el.dataset.f;
+  const value = field === 'dueOffset' ? Number(el.value) : el.value || null;
+  if (field === 'dueOffset' && !Number.isFinite(value)) {
+    toast("The due offset wasn't saved. Enter a whole number of days, such as -60 or 0.", { kind: 'err' });
+    render();
+    return;
+  }
+  saveTemplateChange(gate.name, () => (gate[field] = value));
+};
+BLUR.templateValueBlur = el => {
+  const gate = gateById(activeTemplate(), el.dataset.gate);
+  const value = gate?.values.find(item => item.id === el.dataset.value);
+  const next = el.value.trim();
+  if (!value || !next || value[el.dataset.f] === next) return;
+  if (gate.values.some(item => item !== value && item.name.toLowerCase() === next.toLowerCase())) {
+    toast(`${next} is already a value of ${gate.name}. Use another name.`, { kind: 'err' });
+    render();
+    return;
+  }
+  saveTemplateChange(gate.name, () => (value[el.dataset.f] = next));
+};
+IN.templateValueChange = el => {
+  const gate = gateById(activeTemplate(), el.dataset.gate);
+  const value = gate?.values.find(item => item.id === el.dataset.value);
+  if (!value) return;
+  const next = el.type === 'checkbox' ? el.checked : el.value;
+  saveTemplateChange(gate.name, () => (value[el.dataset.f] = next));
+};
+BLUR.templateFieldBlur = el => {
+  const field = activeTemplate().fields.find(item => item.id === el.dataset.field);
+  const value = el.value.trim();
+  if (field && value && field[el.dataset.f] !== value) saveTemplateChange(field.name, () => (field[el.dataset.f] = value));
+};
+IN.templateFieldChange = el => {
+  const field = activeTemplate().fields.find(item => item.id === el.dataset.field);
+  if (!field) return;
+  saveTemplateChange(field.name, () => (field[el.dataset.f] = el.type === 'checkbox' ? el.checked : el.value));
+};
+BLUR.templateStatusBlur = el => {
+  const status = activeTemplate().statuses.find(item => item.id === el.dataset.status);
+  const value = el.value.trim();
+  if (status && value && status[el.dataset.f] !== value) saveTemplateChange(value, () => (status[el.dataset.f] = value));
+};
+IN.templateStatusChange = el => {
+  const status = activeTemplate().statuses.find(item => item.id === el.dataset.status);
+  if (status) saveTemplateChange(status.name, () => (status[el.dataset.f] = el.value));
+};
+BLUR.templateLegendBlur = el => {
+  const code = activeTemplate().legend.find(item => item.id === el.dataset.code);
+  const value = el.value.trim();
+  if (code && value && code[el.dataset.f] !== value) saveTemplateChange(code.name, () => (code[el.dataset.f] = value));
+};
+IN.templateLegendChange = el => {
+  const code = activeTemplate().legend.find(item => item.id === el.dataset.code);
+  if (code) saveTemplateChange(code.name, () => (code[el.dataset.f] = el.value));
 };
 IN.viewQ = el => {
   viewOf(el.dataset.key).q = el.value;

@@ -56,7 +56,7 @@ export const ROUTE_ICONS = {
 };
 
 export function go(route, params = {}, opt = {}) {
-  if (route === 'project' && !params.tab) params.tab = 'board';
+  if (route === 'project' && !params.tab) params.tab = proj(params.id)?.kind === 'launch' ? 'table' : 'board';
   if (!opt.back) S.ui.history.push({ route: S.ui.route, params: S.ui.params });
   const same = S.ui.route === route && JSON.stringify(S.ui.params) === JSON.stringify(params);
   S.ui.route = route;
