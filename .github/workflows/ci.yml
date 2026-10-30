@@ -124,6 +124,15 @@ jobs:
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile("$PWD\local\check.ps1", [ref]$null, [ref]$errors) | Out-Null
           if ($errors) { $errors | Format-List; exit 1 }
+      # The runner's Docker service is sometimes still starting when the job begins, and check.ps1 then
+      # rightly stops with "Docker is installed but not running".
+      - name: Wait for the runner's Docker service
+        run: |
+          $service = Get-Service docker
+          if ($service.Status -ne 'Running') { Start-Service docker }
+          $service.WaitForStatus('Running', '00:02:00')
+          docker version --format 'Docker {{.Server.Version}} is running'
+          if ($LASTEXITCODE -ne 0) { Write-Error 'The Docker service is running but does not answer; re-run the job.'; exit 1 }
       - name: Runs, and cleans up with -Stop
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\local\check.ps1 -Stop
 
