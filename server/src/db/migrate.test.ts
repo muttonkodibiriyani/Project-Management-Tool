@@ -57,7 +57,7 @@ test('migrations build the whole schema in an empty database, and a second run a
   const db = await emptyDatabase(t);
   const owner = await db.connect();
 
-  assert.deepEqual(await migrate(owner, () => undefined), ['0001_init']);
+  assert.deepEqual(await migrate(owner, () => undefined), ['0001_init', '0002_import_store_map']);
   const { rows: tables } = await owner.query<{ name: string }>(
     "select table_name as name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE' order by 1",
   );
@@ -75,8 +75,13 @@ test('migrations build the whole schema in an empty database, and a second run a
   const { rows: applied } = await owner.query<{ name: string }>('select name from migrations.pgmigrations');
   assert.deepEqual(
     applied.map(row => row.name),
-    ['0001_init'],
+    ['0001_init', '0002_import_store_map'],
   );
+  const { rows: storeMap } = await owner.query<{ type: string; nullable: string; fallback: string }>(
+    `select data_type as type, is_nullable as nullable, column_default as fallback
+       from information_schema.columns where table_name = 'import_job' and column_name = 'store_map'`,
+  );
+  assert.deepEqual(storeMap, [{ type: 'jsonb', nullable: 'NO', fallback: "'{}'::jsonb" }]);
 });
 
 test('every update moves a row onto the change feed', async t => {
