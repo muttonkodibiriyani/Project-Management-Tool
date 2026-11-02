@@ -36,7 +36,8 @@ export interface Normalisation {
   cells: number;
 }
 
-export type ExceptionKind = 'unknown_value' | 'duplicate' | 'double_linked' | 'cleared_error' | 'unknown_brand' | 'unknown_vendor' | 'unknown_store';
+export type ExceptionKind =
+  'unknown_value' | 'duplicate' | 'double_linked' | 'cleared_error' | 'conflict' | 'unknown_brand' | 'unknown_vendor' | 'unknown_store';
 
 export interface ImportException {
   sheet: string;
@@ -62,6 +63,8 @@ export interface ImportContext {
   defaultYear?: number;
   /** Column letter → target, overriding the layout (wizard mapping table). */
   mapping?: Record<string, string>;
+  /** Review choices from an earlier preview, keyed by `field\0original`. */
+  normalisations?: Record<string, string>;
 }
 
 export interface PreparedImport {
@@ -70,6 +73,49 @@ export interface PreparedImport {
   lines: ImportedLine[];
   normalisations: Normalisation[];
   exceptions: ImportException[];
+}
+
+export interface ExceptionDecision {
+  rowNo: number;
+  field: string | null;
+  kind: ExceptionKind;
+  value: string | null;
+  resolution: { action: 'map' | 'skip' | 'keep_as_note' | 'create'; to?: string };
+}
+
+/** Applies step-3 choices to a freshly prepared draft before diffing or committing it. */
+export function applyExceptionResolutions(prepared: PreparedImport, decisions: ExceptionDecision[]): void {
+  const skipped = new Set(decisions.filter(item => item.resolution.action === 'skip').map(item => item.rowNo));
+  prepared.lines = prepared.lines.filter(line => !skipped.has(line.rowNo));
+  for (const decision of decisions) {
+    const to = decision.resolution.action === 'map' ? decision.resolution.to?.trim() : undefined;
+    if (!to) continue;
+    const line = prepared.lines.find(item => item.rowNo === decision.rowNo);
+    if (!line) continue;
+    if (decision.kind === 'unknown_brand') {
+      const from = String(line.fields.Brand ?? decision.value ?? '');
+      line.fields.Brand = to;
+      if (line.install) line.install.Brand = to;
+      const external = String(line.fields['External key'] ?? '');
+      line.fields['External key'] = external.toLocaleLowerCase().endsWith(from.toLocaleLowerCase())
+        ? `${external.slice(0, Math.max(0, external.length - from.length))}${to}`
+        : external;
+      line.key = line.lineId ?? matchKey(line.fields['External key']);
+      continue;
+    }
+    if (decision.kind === 'unknown_vendor') {
+      for (const fields of Object.values(line.distribution)) {
+        if (alnumKey(String(fields.Distributor ?? '')) === alnumKey(decision.value ?? '')) fields.Distributor = to;
+      }
+      continue;
+    }
+    const field = decision.field;
+    if (!field) continue;
+    if (field in line.fields) line.fields[field] = to;
+    for (const fields of Object.values(line.distribution)) if (field in fields) fields[field] = to;
+    for (const fields of Object.values(line.refFixtures)) if (field in fields) fields[field] = to;
+    if (line.install && field in line.install) line.install[field] = to;
+  }
 }
 
 export class MappingError extends Error {
@@ -153,6 +199,16 @@ class RowReader {
   private list(field: string, list: ListName, v: CellValue | undefined, notes: (note: string) => void): Value {
     const text = cellText(v);
     if (text === null || this.cleared(field, v)) return null;
+    const reviewed = this.ctx.normalisation(field, text);
+    if (reviewed !== undefined) {
+      this.out.record(field, text, reviewed);
+      if (reviewed === '(empty)') return null;
+      if (reviewed === '(moved to Notes)') {
+        notes(`${field}: ${text}`);
+        return null;
+      }
+      return reviewed;
+    }
     const m = matchList(VOCAB[list], text);
     if (!m) {
       notes(`${field}: ${text}`);
@@ -441,6 +497,7 @@ class Resolver {
   private readonly vendors = new Map<string, string>();
   private readonly knownVendors = new Set<string>();
   readonly defaultYear: number | undefined;
+  private readonly reviewed: Record<string, string>;
 
   constructor(
     ctx: ImportContext,
@@ -459,6 +516,11 @@ class Resolver {
       }
     }
     this.defaultYear = ctx.defaultYear;
+    this.reviewed = ctx.normalisations ?? {};
+  }
+
+  normalisation(field: string, original: string): string | undefined {
+    return this.reviewed[`${field}\u0000${original}`];
   }
 
   /** A store code or alias ('DH' for HILLS), or a market code. Unknown names are kept and listed. */

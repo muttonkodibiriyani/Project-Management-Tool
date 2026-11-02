@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { LightMyRequestResponse } from 'fastify';
-import { apiFixture, ifMatch, TASK_ROUTES, WS } from '../../testing/api.js';
+import { apiFixture, ifMatch, IMPORT_ROUTES, TASK_ROUTES, WS } from '../../testing/api.js';
 import { skipWithoutDatabase } from '../../testing/database.js';
 
 interface Problem {
@@ -347,6 +347,6 @@ test('me, workspaces, members, teams, projects, activity, views, search and sync
   });
 
   await t.test('every other route has a test', () => {
-    f.assertCovered(['/me', '/workspaces', '/w/:ws'], TASK_ROUTES);
+    f.assertCovered(['/me', '/workspaces', '/w/:ws'], [...TASK_ROUTES, ...IMPORT_ROUTES]);
   });
 });

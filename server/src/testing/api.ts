@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
+import type { ContainerClient } from '@azure/storage-blob';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import pg from 'pg';
 import type { Access } from '../access/policy.js';
@@ -35,6 +36,8 @@ const TEAMS = { brand: 'brand', supply: 'supply', vm: 'vm', comms: 'comms', comm
 export const WS = 'synthetic';
 /** The routes tasks.test.ts covers; workspace.test.ts covers the rest of the API. */
 export const TASK_ROUTES = ['/w/:ws/tasks', '/w/:ws/follow-ups', '/w/:ws/subtasks', '/w/:ws/comments'];
+/** The routes imports.test.ts covers; workspace.test.ts covers the rest of the API. */
+export const IMPORT_ROUTES = ['/w/:ws/imports', '/w/:ws/projects/:id/export'];
 
 export interface RegisteredRoute {
   method: string;
@@ -73,7 +76,7 @@ interface CallOptions {
  * Template fields: zone (line text), channel (line select, one archived option), supply_ready (line gate
  * of supply) and vm_dressed (line × store gate of vm).
  */
-export async function apiFixture(t: TestContext): Promise<Fixture> {
+export async function apiFixture(t: TestContext, blobs: ContainerClient = unusedBlobs): Promise<Fixture> {
   // After-hooks run in the order they are added: the app and its pool close before the database is dropped.
   const closing: (() => Promise<void>)[] = [];
   t.after(async () => {
@@ -143,7 +146,7 @@ export async function apiFixture(t: TestContext): Promise<Fixture> {
   const app = buildApp({
     publicDir: mkdtempSync(join(tmpdir(), 'lt-public-')),
     pool,
-    blobs: unusedBlobs,
+    blobs,
     health: () => Promise.resolve({ status: 'ok', commit: '', imageDigest: '', checks: [] }),
     auth: devAuth(),
   });

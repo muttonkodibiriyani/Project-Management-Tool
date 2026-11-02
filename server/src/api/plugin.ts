@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { ContainerClient } from '@azure/storage-blob';
 import fastifyCookie from '@fastify/cookie';
+import fastifyMultipart from '@fastify/multipart';
 import fastifyRateLimit from '@fastify/rate-limit';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { allows, isAccess } from '../access/policy.js';
 import { SESSION_COOKIE } from '../auth/plugin.js';
 import { loadCaller, loadWorkspace } from './context.js';
+import { UPLOAD_LIMIT } from './files.js';
 import { ApiError, type FieldError } from './problem.js';
 import { routes } from './routes/index.js';
 
@@ -61,6 +63,10 @@ function fieldErrors(validation: AjvError[]): FieldError[] {
 
 function toProblem(error: FastifyError & { validation?: AjvError[]; validationContext?: string }): ApiError | undefined {
   if (error instanceof ApiError) return error;
+  if (error.code === 'FST_REQ_FILE_TOO_LARGE')
+    return new ApiError(413, 'payload_too_large', 'The file is over 25 MiB. Remove unused sheets or images, then upload it again.');
+  if (['FST_FILES_LIMIT', 'FST_FIELDS_LIMIT', 'FST_PARTS_LIMIT'].includes(error.code))
+    return new ApiError(400, 'bad_request', 'Send one file and no more than 10 form fields, then try again.');
   if (error.validation) {
     if (error.validationContext === 'body') {
       const errors = fieldErrors(error.validation);
@@ -97,6 +103,17 @@ function sendProblem(reply: FastifyReply, request: FastifyRequest, problem: ApiE
  */
 export async function api(app: FastifyInstance, { pool, blobs }: ApiOptions) {
   await app.register(fastifyCookie);
+  await app.register(fastifyMultipart, {
+    limits: {
+      files: 1,
+      fileSize: UPLOAD_LIMIT,
+      fields: 10,
+      parts: 11,
+      fieldNameSize: 100,
+      fieldSize: 20_000,
+      headerPairs: 200,
+    },
+  });
   // Counted before the session is looked up, so a flood never reaches the database.
   await app.register(fastifyRateLimit, {
     max: RATE_LIMIT,
@@ -146,5 +163,8 @@ export async function api(app: FastifyInstance, { pool, blobs }: ApiOptions) {
   app.all('/', unknown, answerUnknown);
   app.all('/*', unknown, answerUnknown);
 
+  // Do not pass Fastify's inherited `prefix` back into the child registration.
+  // Doing so would mount every route at /api/v1/api/v1 after this plugin is
+  // registered with its public prefix.
   await app.register(routes, { pool, blobs });
 }

@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildXlsx, rowAt, type TestCell } from '../testing/xlsx.js';
-import { MappingError, flatten, planReimport, prepareImport, usedGroups, type ExistingLine, type ImportContext, type ImportedLine } from './import.js';
+import {
+  MappingError,
+  applyExceptionResolutions,
+  flatten,
+  planReimport,
+  prepareImport,
+  usedGroups,
+  type ExistingLine,
+  type ImportContext,
+  type ImportedLine,
+} from './import.js';
 import { KNOWN_LAYOUTS, detectLayout } from './layouts.js';
 import { readWorkbook, type Sheet } from './xlsx-read.js';
 
@@ -326,4 +336,18 @@ test('a Line ID in the file wins over the external key', () => {
   const plan = planReimport(existing, incoming);
   assert.equal(plan.changes[0]?.lineId, 'L-9');
   assert.deepEqual(plan.changes[0].fields, [{ path: 'line.External key', from: null, to: 'Body Brand New' }]);
+});
+
+test('reviewed exceptions map brands and vendors or skip the selected row before commit', () => {
+  const prepared = prepareLaunchTracker();
+  applyExceptionResolutions(prepared, [
+    { rowNo: 4, field: 'Brand', kind: 'unknown_brand', value: 'Brand Alpha', resolution: { action: 'map', to: 'Brand Master' } },
+    { rowNo: 4, field: 'Distributor', kind: 'unknown_vendor', value: 'Vendor One LLC', resolution: { action: 'map', to: 'Vendor Master' } },
+    { rowNo: 6, field: null, kind: 'duplicate', value: null, resolution: { action: 'skip' } },
+  ]);
+  const mapped = line(prepared.lines, 4);
+  assert.equal(mapped.fields.Brand, 'Brand Master');
+  assert.equal(mapped.fields['External key'], 'Prestige skincare - Korean Brand Master');
+  assert.equal(mapped.distribution.QAT?.Distributor, 'Vendor Master');
+  assert.ok(!prepared.lines.some(item => item.rowNo === 6));
 });
