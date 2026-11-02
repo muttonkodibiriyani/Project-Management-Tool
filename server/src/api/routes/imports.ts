@@ -8,7 +8,7 @@ import { MANAGERS, seesContacts, seesMargins } from '../../access/policy.js';
 import { tx, type Db } from '../../db/tx.js';
 import { commitPrepared, loadExportData, prepareAgainstDatabase, projectStores, type PreparedDraft } from '../../excel/database.js';
 import { CSV_SCOPES, installSchedule, toCsv, vendorPack, type CsvScope } from '../../excel/exports.js';
-import { prepareImport, type PreparedImport } from '../../excel/import.js';
+import { applyExceptionResolutions, prepareImport, type ExceptionDecision, type PreparedImport } from '../../excel/import.js';
 import { detectLayout, type Layout } from '../../excel/layouts.js';
 import { ImportError, LIMITS, readWorkbook, type Workbook } from '../../excel/xlsx-read.js';
 import { fillWorkbook } from '../../excel/xlsx-write.js';
@@ -198,6 +198,20 @@ async function prepareContext(db: Db, request: FastifyRequest, job: JobRow) {
   };
 }
 
+async function applyReviewedExceptions(db: Db, job: JobRow, prepared: PreparedImport): Promise<void> {
+  const decisions = await db.query<{
+    row_no: number;
+    field: string | null;
+    kind: ExceptionDecision['kind'];
+    value: string | null;
+    resolution: ExceptionDecision['resolution'];
+  }>('select row_no,field,kind,value,resolution from import_exception where import_id=$1 and resolution is not null', [job.id]);
+  applyExceptionResolutions(
+    prepared,
+    decisions.rows.map(item => ({ rowNo: item.row_no, field: item.field, kind: item.kind, value: item.value, resolution: item.resolution })),
+  );
+}
+
 function removeRestricted(prepared: PreparedImport, request: FastifyRequest): void {
   const workspace = workspaceOf(request);
   const margin = seesMargins(workspace.settings, workspace.actor);
@@ -255,6 +269,12 @@ async function savePreview(client: pg.PoolClient, job: JobRow, draft: PreparedDr
   }
   for (const item of draft.prepared.exceptions) {
     const key = [item.sheet, item.rowNo, item.field, item.kind, item.value].join('\u0000');
+    const fallback =
+      item.kind === 'unknown_brand' || item.kind === 'unknown_vendor' || item.kind === 'duplicate'
+        ? { action: 'create' }
+        : item.kind === 'double_linked'
+          ? { action: 'map' }
+          : { action: 'keep_as_note' };
     await client.query('insert into import_exception (import_id,sheet,row_no,field,kind,value,message,resolution) values ($1,$2,$3,$4,$5,$6,$7,$8)', [
       job.id,
       item.sheet,
@@ -263,7 +283,7 @@ async function savePreview(client: pg.PoolClient, job: JobRow, draft: PreparedDr
       item.kind,
       item.value,
       item.message,
-      resolution.get(key) ? JSON.stringify(resolution.get(key)) : null,
+      JSON.stringify(resolution.get(key) ?? fallback),
     ]);
   }
   const result = await client.query<JobRow>(`update import_job set status='previewed', summary=$2, version=version+1 where id=$1 returning *`, [
@@ -424,6 +444,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
     const chosen = chosenLayout(workbook, job);
     const context = await prepareContext(pool, request, job);
     const prepared = prepareImport(chosen.sheet, chosen.layout, chosen.headerRow, context);
+    await applyReviewedExceptions(pool, job, prepared);
     removeRestricted(prepared, request);
     const draft = await prepareAgainstDatabase(pool, String(job.project_id), prepared);
     const stored = await tx(pool, async client => {
@@ -507,6 +528,8 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
     async request => {
       const job = await readJob(pool, workspaceOf(request).id, request.params.id);
       if (['committed', 'cancelled'].includes(job.status)) throw importState(`This import is already ${job.status}.`);
+      if (request.body.resolution.action === 'map' && !request.body.resolution.to?.trim())
+        throw invalid([{ path: 'resolution.to', code: 'required', message: 'Pick the value this should map to.' }]);
       const result = await pool.query<Row>('update import_exception set resolution=$3 where import_id=$1 and id=$2 returning *', [
         job.id,
         request.params.exceptionId,
@@ -533,6 +556,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
     const chosen = chosenLayout(workbook, job);
     const context = await prepareContext(pool, request, job);
     const prepared = prepareImport(chosen.sheet, chosen.layout, chosen.headerRow, context);
+    await applyReviewedExceptions(pool, job, prepared);
     removeRestricted(prepared, request);
     const draft = await prepareAgainstDatabase(pool, String(job.project_id), prepared);
     const savedSummary = job.summary && typeof job.summary === 'object' && !Array.isArray(job.summary) ? (job.summary as Record<string, unknown>) : {};

@@ -163,5 +163,8 @@ export async function api(app: FastifyInstance, { pool, blobs }: ApiOptions) {
   app.all('/', unknown, answerUnknown);
   app.all('/*', unknown, answerUnknown);
 
+  // Do not pass Fastify's inherited `prefix` back into the child registration.
+  // Doing so would mount every route at /api/v1/api/v1 after this plugin is
+  // registered with its public prefix.
   await app.register(routes, { pool, blobs });
 }

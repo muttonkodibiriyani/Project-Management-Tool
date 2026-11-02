@@ -366,7 +366,7 @@ export async function commitPrepared(
     const storeByCode = new Map(stores.map(store => [matchKey(store.code), store]));
     const tasks = await client.query<Row>(
       `select t.*, b.name as brand from task t left join brand b on b.id=t.brand_id
-        where t.project_id=$1 and t.kind='line' and t.deleted_at is null for update`,
+        where t.project_id=$1 and t.kind='line' and t.deleted_at is null for update of t`,
       [project.id],
     );
     for (const task of tasks.rows) {

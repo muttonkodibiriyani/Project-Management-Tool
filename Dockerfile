@@ -29,6 +29,7 @@ LABEL org.opencontainers.image.title="Launch Tracker" \
 ENV GIT_COMMIT=${GIT_COMMIT}
 WORKDIR /app
 COPY LICENSE NOTICE ./
+COPY templates/launch-workbook/launch-workbook-template.xlsx ./templates/launch-workbook/launch-workbook-template.xlsx
 COPY --from=server /src/package.json ./
 COPY --from=server /src/node_modules ./node_modules
 COPY --from=server /src/dist ./dist

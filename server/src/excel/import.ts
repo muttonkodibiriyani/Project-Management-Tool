@@ -75,6 +75,49 @@ export interface PreparedImport {
   exceptions: ImportException[];
 }
 
+export interface ExceptionDecision {
+  rowNo: number;
+  field: string | null;
+  kind: ExceptionKind;
+  value: string | null;
+  resolution: { action: 'map' | 'skip' | 'keep_as_note' | 'create'; to?: string };
+}
+
+/** Applies step-3 choices to a freshly prepared draft before diffing or committing it. */
+export function applyExceptionResolutions(prepared: PreparedImport, decisions: ExceptionDecision[]): void {
+  const skipped = new Set(decisions.filter(item => item.resolution.action === 'skip').map(item => item.rowNo));
+  prepared.lines = prepared.lines.filter(line => !skipped.has(line.rowNo));
+  for (const decision of decisions) {
+    const to = decision.resolution.action === 'map' ? decision.resolution.to?.trim() : undefined;
+    if (!to) continue;
+    const line = prepared.lines.find(item => item.rowNo === decision.rowNo);
+    if (!line) continue;
+    if (decision.kind === 'unknown_brand') {
+      const from = String(line.fields.Brand ?? decision.value ?? '');
+      line.fields.Brand = to;
+      if (line.install) line.install.Brand = to;
+      const external = String(line.fields['External key'] ?? '');
+      line.fields['External key'] = external.toLocaleLowerCase().endsWith(from.toLocaleLowerCase())
+        ? `${external.slice(0, Math.max(0, external.length - from.length))}${to}`
+        : external;
+      line.key = line.lineId ?? matchKey(line.fields['External key']);
+      continue;
+    }
+    if (decision.kind === 'unknown_vendor') {
+      for (const fields of Object.values(line.distribution)) {
+        if (alnumKey(String(fields.Distributor ?? '')) === alnumKey(decision.value ?? '')) fields.Distributor = to;
+      }
+      continue;
+    }
+    const field = decision.field;
+    if (!field) continue;
+    if (field in line.fields) line.fields[field] = to;
+    for (const fields of Object.values(line.distribution)) if (field in fields) fields[field] = to;
+    for (const fields of Object.values(line.refFixtures)) if (field in fields) fields[field] = to;
+    if (line.install && field in line.install) line.install[field] = to;
+  }
+}
+
 export class MappingError extends Error {
   constructor(readonly groups: string[]) {
     super(`Pick the store these columns belong to: ${groups.join(', ')}.`);
