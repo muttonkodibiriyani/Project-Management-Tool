@@ -385,6 +385,119 @@ test('partial outbox success is checkpointed and does not replay an accepted edi
   assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
 });
 
+test('a pre-call marker recovers an accepted edit when the transport promise never settles', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let visible;
+  let patchAttempts = 0;
+  let semanticWrites = 0;
+  const etags = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/projects/project-1' && options.method === 'PATCH') {
+      patchAttempts += 1;
+      etags.push(options.etag);
+      const current = serverBoot.projects[0];
+      if (options.etag !== current.version) throw Object.assign(new Error('Project version conflict.'), { status: 409 });
+      semanticWrites += 1;
+      Object.assign(current, options.body, { version: current.version + 1 });
+      return new Promise(() => {});
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.projects[0].name = 'Accepted before process death';
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  await waitFor(() => {
+    const interrupted = JSON.parse(storage.getItem(pointer.key));
+    assert.equal(interrupted.outbox[0].revalidate, true, 'the marker is durable before awaiting transport');
+    assert.equal(serverBoot.projects[0].version, 2);
+  });
+  first.stop();
+
+  const resumed = createSync(options);
+  await resumed.start();
+  resumed.stop();
+
+  assert.equal(patchAttempts, 1, 'canonical proof prevents replay of the accepted ETag');
+  assert.equal(semanticWrites, 1);
+  assert.deepEqual(etags, [1]);
+  assert.equal(serverBoot.projects[0].name, 'Accepted before process death');
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
+test('a pre-call marker retries once when process death happened before server apply', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let visible;
+  let patchAttempts = 0;
+  let semanticWrites = 0;
+  const etags = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/projects/project-1' && options.method === 'PATCH') {
+      patchAttempts += 1;
+      etags.push(options.etag);
+      if (patchAttempts === 1) return new Promise(() => {});
+      const current = serverBoot.projects[0];
+      if (options.etag !== current.version) throw Object.assign(new Error('Project version conflict.'), { status: 409 });
+      semanticWrites += 1;
+      Object.assign(current, options.body, { version: current.version + 1 });
+      return { data: structuredClone(current) };
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.projects[0].name = 'Retry after process death';
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  await waitFor(() => assert.equal(JSON.parse(storage.getItem(pointer.key)).outbox[0].revalidate, true));
+  first.stop();
+
+  const resumed = createSync(options);
+  await resumed.start();
+  resumed.stop();
+
+  assert.equal(patchAttempts, 2);
+  assert.equal(semanticWrites, 1);
+  assert.deepEqual(etags, [1, 1]);
+  assert.equal(serverBoot.projects[0].name, 'Retry after process death');
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
 test('accepted project, task and comment edits survive lost responses and resume later work', async () => {
   const storage = new MemoryStorage();
   let serverBoot = structuredClone(BOOT);
@@ -472,13 +585,12 @@ test('accepted project, task and comment edits survive lost responses and resume
   assert.deepEqual(completed.rowCheckpoints, {});
 });
 
-test('an accepted delete with a lost response is completed from canonical absence after restart', async () => {
+test('an accepted delete with a never-settling response is completed from canonical absence after restart', async () => {
   const storage = new MemoryStorage();
   let serverBoot = structuredClone(BOOT);
   let visible;
   let deleteAttempts = 0;
   let semanticDeletes = 0;
-  const statuses = [];
   const request = async (path, options = {}) => {
     if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
     if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
@@ -490,7 +602,7 @@ test('an accepted delete with a lost response is completed from canonical absenc
       if (options.etag !== current?.version) throw Object.assign(new Error('Comment version conflict.'), { status: 409 });
       semanticDeletes += 1;
       serverBoot.comments = serverBoot.comments.filter(comment => comment.id !== 'comment-1');
-      throw new Error('The delete response was lost after server acceptance.');
+      return new Promise(() => {});
     }
     throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
   };
@@ -501,7 +613,6 @@ test('an accepted delete with a lost response is completed from canonical absenc
     onData: data => {
       visible = data;
     },
-    onStatus: status => statuses.push(status),
     setTimer: () => 1,
     clearTimer: () => {},
     events: {},
@@ -511,7 +622,11 @@ test('an accepted delete with a lost response is completed from canonical absenc
   const next = structuredClone(visible);
   next.comments = [];
   first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
-  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  await waitFor(() => {
+    assert.equal(JSON.parse(storage.getItem(pointer.key)).outbox[0].revalidate, true);
+    assert.equal(serverBoot.comments.length, 0);
+  });
   first.stop();
 
   const resumed = createSync(options);
@@ -521,7 +636,6 @@ test('an accepted delete with a lost response is completed from canonical absenc
   assert.equal(deleteAttempts, 1);
   assert.equal(semanticDeletes, 1);
   assert.equal(serverBoot.comments.length, 0);
-  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
   assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
 });
 
@@ -530,8 +644,6 @@ test('a concurrent change after an ambiguous edit remains a version conflict', a
   let serverBoot = structuredClone(BOOT);
   let visible;
   let patchAttempts = 0;
-  let dropBeforeApply = true;
-  const statuses = [];
   const conflicts = [];
   const request = async (path, options = {}) => {
     if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
@@ -540,11 +652,7 @@ test('a concurrent change after an ambiguous edit remains a version conflict', a
     if (path === '/api/v1/me/sessions') return { data: { items: [] } };
     if (path === '/api/v1/w/synthetic/projects/project-1' && options.method === 'PATCH') {
       patchAttempts += 1;
-      if (dropBeforeApply) {
-        dropBeforeApply = false;
-        throw new Error('The request was lost before the server applied it.');
-      }
-      throw new Error('The stale patch must not be retried.');
+      return new Promise(() => {});
     }
     throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
   };
@@ -555,7 +663,6 @@ test('a concurrent change after an ambiguous edit remains a version conflict', a
     onData: data => {
       visible = data;
     },
-    onStatus: status => statuses.push(status),
     onConflict: error => conflicts.push(error),
     setTimer: () => 1,
     clearTimer: () => {},
@@ -566,7 +673,8 @@ test('a concurrent change after an ambiguous edit remains a version conflict', a
   const next = structuredClone(visible);
   next.projects[0].name = 'My pending edit';
   first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
-  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  await waitFor(() => assert.equal(JSON.parse(storage.getItem(pointer.key)).outbox[0].revalidate, true));
   first.stop();
 
   serverBoot.projects[0] = { ...serverBoot.projects[0], name: 'Changed by another user', version: 2 };
@@ -578,7 +686,6 @@ test('a concurrent change after an ambiguous edit remains a version conflict', a
   assert.equal(conflicts.length, 1);
   assert.equal(conflicts[0].status, 409);
   assert.equal(serverBoot.projects[0].name, 'Changed by another user');
-  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
   assert.equal(JSON.parse(storage.getItem(pointer.key)).outbox.length, 1, 'the conflict remains available for user resolution');
 });
 

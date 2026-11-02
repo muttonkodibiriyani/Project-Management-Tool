@@ -712,6 +712,8 @@ export function createSync({
       .filter(value => value !== undefined && value !== null)
       .map(String)
       .join(':');
+  const needsAmbiguityMarker = operation =>
+    operation.action !== 'create' && ['project', 'task', 'comment', 'subtask', 'event', 'view', 'notification', 'prefs'].includes(operation.resource);
 
   async function flush() {
     if (flushing || stopped || !state?.outbox.length) return;
@@ -722,6 +724,7 @@ export function createSync({
         const pending = state.outbox[0];
         let revalidated = false;
         if (pending.revalidate) {
+          profile = (await request('/api/v1/me')).data;
           await bootstrap({ publishData: false });
           // Keep this flag durable until the whole plan is removed. A crash between
           // revalidation and checkpointing must revalidate again, never replay blind.
@@ -749,6 +752,13 @@ export function createSync({
               code: 'version_conflict',
               current: reconciled.row,
             });
+          if (needsAmbiguityMarker(operation) && !pending.revalidate) {
+            // Persist before crossing the transport boundary. If the process dies after
+            // server acceptance but before the promise settles, restart must prove the
+            // canonical result rather than replay the stale ETag.
+            pending.revalidate = true;
+            persist();
+          }
           await call(operation);
           completed.add(operationId);
           pending.completed = [...completed];
