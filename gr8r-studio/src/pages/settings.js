@@ -8,6 +8,7 @@ import { av, pIcon } from '../ui/helpers.js';
 import { permsTable, teamsGrid } from './members.js';
 import { page404 } from './errors.js';
 import { SHORTCUTS } from '../overlays/modals.js';
+import { templatesSettingsHtml } from '../views/templates-settings.js';
 
 export const SET_NAV = [
   [
@@ -25,6 +26,7 @@ export const SET_NAV = [
       ['members', 'Members', 'users'],
       ['teams', 'Teams', 'users-round'],
       ['projects', 'Projects', 'folder-kanban'],
+      ['templates', 'Templates & fields', 'layout-template'],
       ['permissions', 'Permissions', 'shield'],
     ],
   ],
@@ -239,6 +241,8 @@ export function settingsBody(sec, title) {
         `<div class="sblock"><h2>Archived projects</h2>${arch.length ? arch.map(p => `<div class="srow"><div class="row">${pIcon(p, '', 14)}<b style="font-weight:500">${esc(p.name)}</b></div><div class="row"><button class="btn btn-secondary btn-sm" data-a="restoreProject" data-id="${p.id}">Restore</button><button class="btn btn-danger-ghost btn-sm" data-a="delProject" data-id="${p.id}">Delete</button></div></div>`).join('') : `<p class="faint" style="padding:12px 0">No archived projects. Archived projects are hidden from the sidebar but keep all their tasks.</p>`}<div style="margin-top:12px"><button class="btn btn-secondary btn-sm" data-a="go" data-r="archive">${ic('archive', 13)}Open archive</button></div></div>`
       );
     }
+    case 'templates':
+      return templatesSettingsHtml();
     case 'permissions':
       return (
         H('Control what each role can do.') +

@@ -1,11 +1,13 @@
 /* ---------- drag & drop ---------- */
 import { $, $$, addD, diffD, fmtDate, iso, parse } from '../core/utils.js';
 import { PR, ST } from '../core/constants.js';
-import { D, S, proj, save, task } from '../core/store.js';
+import { D, S, logAct, proj, save, task } from '../core/store.js';
 import { mutate, toast } from '../ui/toast.js';
 import { fxSet, render } from '../shell/render.js';
 import { viewOf } from '../shell/view-engine.js';
 import { applyPatch, handleFiles, updateTask } from './actions.js';
+import { groupDefinition, setGroupValue, valueForGroup } from '../features/launch-gates.js';
+import { isLaunchProject, resolveLine, templateForProject } from '../features/launch-state.js';
 
 export let DRAG = null;
 export function clearDropMarks() {
@@ -81,6 +83,9 @@ document.addEventListener('dragover', e => {
     const ref = after || body.querySelector('.addcard, .composer');
     if (line.nextSibling !== ref || line.parentNode !== body) body.insertBefore(line, ref);
     DRAG.col = col.dataset.dropCol;
+    DRAG.group = col.dataset.dropGroup;
+    DRAG.store = col.dataset.dropStore;
+    DRAG.key = col.dataset.key;
     DRAG.before = after ? after.dataset.dragCard : null;
   } else if (DRAG.type === 'row') {
     const row = e.target.closest('.trow[data-task-row]');
@@ -135,8 +140,26 @@ document.addEventListener('drop', e => {
   clearDropMarks();
   if (d.type === 'card' && d.col) {
     const t = task(d.id);
+    const project = proj(t.project);
+    const launch = isLaunchProject(project) && d.group;
+    const template = launch ? templateForProject(project) : null;
+    const oldValue = launch
+      ? d.group === 'status'
+        ? t.launchStatus || 'proposed'
+        : valueForGroup(t, d.group, d.store || null, template, resolveLine)
+      : t.status;
     const colTs = D()
-      .tasks.filter(x => x.status === d.col && x.id !== t.id && !x.archived)
+      .tasks.filter(
+        x =>
+          x.id !== t.id &&
+          !x.archived &&
+          (!launch || x.project === t.project) &&
+          (launch
+            ? d.group === 'status'
+              ? (x.launchStatus || 'proposed') === d.col
+              : valueForGroup(x, d.group, d.store || null, template, resolveLine) === d.col
+            : x.status === d.col),
+      )
       .sort((a, b) => a.order - b.order);
     let order;
     if (d.before) {
@@ -145,13 +168,31 @@ document.addEventListener('drop', e => {
       const nx = colTs[i];
       order = prev ? (prev.order + nx.order) / 2 : nx.order - 1;
     } else order = colTs.length ? colTs[colTs.length - 1].order + 1 : t.order;
-    const moved = t.status !== d.col;
+    const moved = oldValue !== d.col;
     fxSet({ moved: t.id });
     mutate(() => {
       t.order = order;
-      if (moved) applyPatch(t, { status: d.col });
+      if (!moved) return;
+      if (launch) {
+        if (d.group === 'status') {
+          t.launchStatus = d.col;
+          logAct('changed launch status of', t, `to ${template.statuses.find(status => status.id === d.col)?.name}`);
+        } else {
+          const label = setGroupValue(t, d.group, d.store || null, d.col, template);
+          const definition = groupDefinition(d.group, template);
+          const name = definition?.values?.find(value => value.id === d.col)?.name || d.col;
+          logAct('changed gate on', t, `${label} to ${name}`);
+        }
+      } else applyPatch(t, { status: d.col });
     });
-    if (moved) toast(`Moved “${t.title}” to ${ST[d.col].name}`, { ms: 2200 });
+    if (moved) {
+      const destination = launch
+        ? d.group === 'status'
+          ? template.statuses.find(status => status.id === d.col)?.name
+          : groupDefinition(d.group, template)?.values?.find(value => value.id === d.col)?.name
+        : ST[d.col].name;
+      toast(`Moved “${t.title}” to ${destination}`, { ms: 2200 });
+    }
   } else if (d.type === 'row' && d.target) {
     const t = task(d.id),
       tg = task(d.target);

@@ -5,16 +5,21 @@ import { PR, STATUSES } from '../core/constants.js';
 import { S, commentsOf, pColor, proj } from '../core/store.js';
 import { av, dueHtml, lbl, prIcon, progBar, stIcon } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
+import { groupDefinition, valueForGroup } from '../features/launch-gates.js';
+import { brandCodeMark, gvPill, isLaunchProject, readinessForTask, resolveLine, templateForProject } from '../features/launch-state.js';
+import { viewOf } from '../shell/view-engine.js';
 
 export function kcard(t, opt = {}) {
   const cc = commentsOf(t.id).length;
   const ac = t.attachments.length;
   const sd = t.subtasks.filter(s => s.done).length;
   const p = proj(t.project);
+  const readiness = isLaunchProject(p) ? readinessForTask(t, p) : null;
+  const launchMark = readiness ? brandCodeMark(t, templateForProject(p)) : '';
   return `<div class="kcard ${t.status === 'done' ? 'done' : ''}${fxc('done', t.id)}${fxc('added', t.id)}${fxc('moved', t.id)}" draggable="true" data-drag-card="${t.id}" data-a="openTask" data-id="${t.id}" data-ctx="task" role="button" tabindex="0" aria-label="${esc(t.title)}">
-    ${t.labels.length ? `<div class="labels">${t.labels.map(lbl).join('')}</div>` : ''}
+    ${t.labels.length || launchMark ? `<div class="labels">${launchMark}${t.labels.map(lbl).join('')}</div>` : ''}
     <div class="top">${t.status === 'done' ? `<span class="done-ic" style="margin:2px 7px 0 0;display:inline-flex" aria-label="Done">${stIcon('done', 14)}</span>` : ''}<div class="title">${esc(t.title)}</div></div>
-    ${t.subtasks.length ? `<div class="subp">${ic('list-checks', 12)}<span class="num">${sd}/${t.subtasks.length}</span>${progBar(Math.round((sd / t.subtasks.length) * 100), sd === t.subtasks.length ? 'green' : '')}</div>` : ''}
+    ${readiness ? `<div class="subp"><span class="grow">Readiness</span><span class="num">${readiness.done}/${readiness.applicable}</span>${progBar(readiness.percent, readiness.percent === 100 ? 'green' : '')}<b>${readiness.percent}%</b></div>` : t.subtasks.length ? `<div class="subp">${ic('list-checks', 12)}<span class="num">${sd}/${t.subtasks.length}</span>${progBar(Math.round((sd / t.subtasks.length) * 100), sd === t.subtasks.length ? 'green' : '')}</div>` : ''}
     <div class="meta">
       ${opt.showProj ? `<span class="m" data-tip="${esc(p.name)}"><span class="pdot" style="--c:${pColor(p)}"></span></span>` : ''}
       <span class="key">${t.key}</span>
@@ -28,7 +33,44 @@ export function kcard(t, opt = {}) {
     <div class="hacts"><button class="ibtn ibtn-xs" data-a="toggleDone" data-id="${t.id}" data-tip="${t.status === 'done' ? 'Reopen' : 'Mark complete'}" aria-label="${t.status === 'done' ? 'Reopen' : 'Mark complete'}">${ic(t.status === 'done' ? 'rotate-ccw' : 'check', 13)}</button><button class="ibtn ibtn-xs" data-a="editTask" data-id="${t.id}" data-tip="Quick edit" aria-label="Quick edit">${ic('pencil', 12)}</button><button class="ibtn ibtn-xs" data-a="ctxBtn" data-ctx="task" data-id="${t.id}" aria-label="More">${ic('ellipsis', 13)}</button></div>
   </div>`;
 }
+
+function launchBoardHtml(ts, key, project) {
+  const template = templateForProject(project);
+  const view = viewOf(key);
+  const definition = view.group === 'status' ? null : groupDefinition(view.group, template);
+  if (!template || (view.group !== 'status' && !definition)) return '';
+  const store = definition?.scope === 'store' ? view.store || project.stores?.[0]?.code : null;
+  const values =
+    view.group === 'status' ? template.statuses.map(status => ({ ...status, tone: status.icon, done: status.icon === 'done' })) : definition.values || [];
+  const valueOf = line => (view.group === 'status' ? line.launchStatus || 'proposed' : valueForGroup(line, view.group, store, template, resolveLine));
+  const columns = [
+    ...values,
+    { id: '__empty', name: 'No value', tone: 'gray' },
+    ...(definition?.kind === 'gate' ? [{ id: '__na', name: 'Not applicable', tone: 'gray', notApplicable: true }] : []),
+  ];
+  return `<div class="board launch-board" data-keep="board:${key}">${columns
+    .map(column => {
+      const lines = ts.filter(line => valueOf(line) === column.id).sort((a, b) => a.order - b.order);
+      const header =
+        view.group === 'status' && !column.id.startsWith('__')
+          ? `${stIcon(column.icon)}<span>${esc(column.name)}</span>`
+          : definition?.kind === 'gate' && !column.id.startsWith('__')
+            ? gvPill({ display: column.name, done: column.done, tone: column.tone }, column)
+            : `<span class="gv ${column.notApplicable ? 'na' : 'gray'}"><i></i>${esc(column.name)}</span>`;
+      const drop = column.id.startsWith('__')
+        ? ''
+        : `data-drop-col="${column.id}" data-drop-group="${view.group}" ${store ? `data-drop-store="${store}"` : ''}`;
+      return `<section class="bcol ${column.notApplicable ? 'not-applicable' : ''}" ${drop} data-key="${key}" aria-label="${esc(column.name)}">
+        <div class="bcol-h">${header}<span class="cnt">${lines.length}</span></div>
+        <div class="bcol-b" data-col-body="${column.id}">${lines.map(line => kcard(line, { showProj: false })).join('')}</div>
+      </section>`;
+    })
+    .join('')}</div>`;
+}
+
 export function boardHtml(ts, key, opt = {}) {
+  const project = opt.project ? proj(opt.project) : null;
+  if (isLaunchProject(project)) return launchBoardHtml(ts, key, project);
   return `<div class="board" data-keep="board:${key}">${STATUSES.map(s => {
     const col = ts.filter(t => t.status === s.id).sort((a, b) => a.order - b.order);
     const ck = key + ':' + s.id;

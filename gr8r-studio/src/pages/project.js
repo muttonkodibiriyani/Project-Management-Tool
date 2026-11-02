@@ -15,6 +15,9 @@ import { tableHtml } from '../views/table.js';
 import { calendarHtml } from '../views/calendar.js';
 import { timelineHtml, tlControls } from '../views/timeline.js';
 import { filesHtml } from '../views/files.js';
+import { launchTableHtml } from '../views/launch-table.js';
+import { groupDefinition } from '../features/launch-gates.js';
+import { isLaunchProject, launchDeadlineEvents, templateForProject } from '../features/launch-state.js';
 
 export const PTABS = [
   ['overview', 'Overview', 'layout-dashboard'],
@@ -31,7 +34,7 @@ export function pageProject() {
   const p = proj(S.ui.params.id);
   if (!p) return page404();
   if (!canSee(p)) return stateDenied(p);
-  const tab = S.ui.params.tab || 'board';
+  const tab = S.ui.params.tab || (isLaunchProject(p) ? 'table' : 'board');
   const views = D().savedViews.filter(v => v.project === p.id);
   let body = '';
   const key = 'p:' + p.id;
@@ -93,14 +96,30 @@ export function taskViewBody(type, ts, key, p) {
     'No tasks match these filters.',
     `<button class="btn btn-secondary btn-sm" data-a="clearFilters" data-key="${key}">Clear filters</button>`,
   );
-  if (type === 'board') return viewToolbar(key, { group: false, right: addBtn }) + (noTasks ? emptyAll : boardHtml(ts, key, { project: p.id }));
+  if (type === 'board') {
+    const template = templateForProject(p);
+    const definition = template ? groupDefinition(v.group, template) : null;
+    const storeControl =
+      definition?.scope === 'store'
+        ? `<button class="btn btn-ghost" data-a="pop" data-pop="board-store" data-key="${key}">${ic('store', 14)}Store: ${esc(v.store || p.stores?.[0]?.code || 'Choose')}</button>`
+        : '';
+    return viewToolbar(key, { group: isLaunchProject(p), right: addBtn, extra: storeControl }) + (noTasks ? emptyAll : boardHtml(ts, key, { project: p.id }));
+  }
   if (type === 'list')
     return (
       viewToolbar(key, { right: addBtn }) +
       `<div class="list-wrap">${noTasks ? emptyAll : !ts.length ? emptyFilter : listHtml(groupTasks(ts, v.group), key, { project: p.id })}</div>`
     );
-  if (type === 'table') return viewToolbar(key, { cols: true, right: addBtn }) + (noTasks ? emptyAll : tableHtml(ts, key, p));
-  if (type === 'calendar') return viewToolbar(key, { group: false, right: addBtn }) + calendarHtml(ts, { key, project: p.id, events: true });
+  if (type === 'table')
+    return (
+      viewToolbar(key, { cols: !isLaunchProject(p), right: addBtn }) +
+      (noTasks ? emptyAll : isLaunchProject(p) ? launchTableHtml(ts, p) : tableHtml(ts, key, p))
+    );
+  if (type === 'calendar')
+    return (
+      viewToolbar(key, { group: false, right: addBtn }) +
+      calendarHtml(ts, { key, project: p.id, events: true, extraEvents: isLaunchProject(p) ? launchDeadlineEvents(p, ts) : [] })
+    );
   if (type === 'timeline') return viewToolbar(key, { group: false, right: addBtn, extra: tlControls(key) }) + timelineHtml(ts, key, p);
   return page404();
 }
