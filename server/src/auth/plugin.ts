@@ -65,7 +65,7 @@ export function installAuth(app: FastifyInstance, options: AuthOptions): void {
     });
 
     // Signing out twice, or after the session ended, still clears the cookie and answers the same.
-    auth.post('/auth/logout', async (request, reply) => {
+    auth.post('/auth/logout', { config: { rateLimit: false } }, async (request, reply) => {
       if (request.headers[CSRF_HEADER] !== CSRF_VALUE) {
         return sendProblem(
           request,
@@ -79,7 +79,7 @@ export function installAuth(app: FastifyInstance, options: AuthOptions): void {
       const token = request.cookies[SESSION_COOKIE];
       if (token) await sessions.end(token);
       reply.clearCookie(SESSION_COOKIE, sessionCookie);
-      return { entraLogoutUrl: options.mode === 'entra' ? options.entra.logoutUrl(`${options.publicOrigin}/`) : null };
+      return { logoutUrl: options.mode === 'entra' ? options.entra.logoutUrl(`${options.publicOrigin}/`) : '/auth/login' };
     });
 
     if (options.mode === 'entra') {
@@ -113,8 +113,15 @@ export function installAuth(app: FastifyInstance, options: AuthOptions): void {
         }
       });
     } else {
+      auth.get<{ Querystring: { returnTo?: string } }>('/auth/login', (request, reply) => {
+        const returnTo = safeReturnTo(request.query.returnTo);
+        return reply.redirect(`/auth/dev-login?${new URLSearchParams({ returnTo }).toString()}`, 302);
+      });
+
       auth.get<{ Querystring: { email?: string; returnTo?: string } }>('/auth/dev-login', async (request, reply) => {
         const email = (request.query.email ?? '').trim().toLowerCase();
+        const returnTo = safeReturnTo(request.query.returnTo);
+        if (!email) return reply.type('text/html; charset=utf-8').send(devSignInPage(returnTo));
         const identity = DEV_USERS.find(user => user.email === email);
         if (!identity) {
           return reply
@@ -129,7 +136,7 @@ export function installAuth(app: FastifyInstance, options: AuthOptions): void {
             );
         }
         try {
-          return await startSession(request, reply, identity, safeReturnTo(request.query.returnTo));
+          return await startSession(request, reply, identity, returnTo);
         } catch (error) {
           if (error instanceof SignInError) return refuse(request, reply, error);
           throw error;
@@ -137,6 +144,23 @@ export function installAuth(app: FastifyInstance, options: AuthOptions): void {
       });
     }
   });
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, char => `&#${char.charCodeAt(0)};`);
+}
+
+function devSignInPage(returnTo: string): string {
+  const links = DEV_USERS.map(user => {
+    const href = `/auth/dev-login?${new URLSearchParams({ email: user.email, returnTo }).toString()}`;
+    return `<li><a href="${escapeHtml(href)}">${escapeHtml(user.name)} — ${escapeHtml(user.roles.join(', '))}</a></li>`;
+  }).join('');
+  return [
+    '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>Test sign-in · Launch Tracker</title></head><body><h1>Test sign-in</h1>',
+    '<p>This synthetic identity provider is available only for local runs and CI. Pick a role:</p>',
+    `<ul>${links}</ul></body></html>`,
+  ].join('');
 }
 
 /** Only paths on this site; anything else, including //host and /\host, goes to the home page. */
@@ -199,10 +223,9 @@ const REFUSALS: Record<SignInRefusal, { status: number; title: string; text: str
 
 /** A plain page: no scripts or styles, so it works under the app's Content-Security-Policy. */
 function refusalPage(title: string, text: string, retry: string | null): string {
-  const escape = (value: string) => value.replace(/[&<>"']/g, char => `&#${char.charCodeAt(0)};`);
   return [
     '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
-    `<title>${escape(title)} · Launch Tracker</title></head><body><h1>${escape(title)}</h1><p>${escape(text)}</p>`,
+    `<title>${escapeHtml(title)} · Launch Tracker</title></head><body><h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>`,
     retry ? `<p><a href="${retry}">Sign in again</a></p>` : '',
     '</body></html>',
   ].join('');

@@ -53,15 +53,26 @@ test('the test identity provider signs in one synthetic user per role, in the te
   );
 });
 
-test('the test identity provider refuses anyone else, and Entra routes are absent', async () => {
+test('the common sign-in route opens the dev-only synthetic-user picker', async () => {
   const { writer, started } = recordingSessions();
   const app = devApp(writer);
+  const start = await app.inject(`/auth/login?returnTo=${encodeURIComponent('/#/p/QAT')}`);
+  assert.equal(start.statusCode, 302);
+  assert.equal(start.headers.location, '/auth/dev-login?returnTo=%2F%23%2Fp%2FQAT');
+  const picker = await app.inject(start.headers.location ?? '');
+  assert.equal(picker.statusCode, 200);
+  assert.match(picker.headers['content-type'] ?? '', /^text\/html/);
+  for (const user of DEV_USERS) {
+    assert.ok(picker.body.includes(encodeURIComponent(user.email)));
+    assert.match(picker.body, new RegExp(user.roles[0]?.replace('.', '\\.') ?? 'missing'));
+  }
+  assert.doesNotMatch(picker.body, /<script|style=/);
+
   const unknown = await app.inject('/auth/dev-login?email=someone@corp.example');
   assert.equal(unknown.statusCode, 403);
   assert.match(unknown.body, /viewer@example\.test \(Viewer\)/);
   assert.equal(cookieOf(unknown, SESSION_COOKIE), undefined);
   assert.equal(started.length, 0);
-  assert.equal((await app.inject('/auth/login')).statusCode, 404);
   assert.equal((await app.inject({ method: 'POST', url: '/auth/callback' })).statusCode, 404);
 
   const session = await app.inject('/auth/dev-login?email=Manager@Example.test&returnTo=/%23/p/QAT');
@@ -83,7 +94,7 @@ test('sign-out needs the CSRF header, ends the session and clears the cookie', a
 
   const out = await app.inject({ method: 'POST', url: '/auth/logout', headers: { cookie, ...CSRF } });
   assert.equal(out.statusCode, 200);
-  assert.deepEqual(out.json(), { entraLogoutUrl: null });
+  assert.deepEqual(out.json(), { logoutUrl: '/auth/login' });
   assert.equal(cookieOf(out, SESSION_COOKIE)?.value, '');
   assert.deepEqual(ended, [started[0]?.token]);
 
@@ -115,6 +126,17 @@ test('returnTo stays on this site', () => {
     undefined,
   ]) {
     assert.equal(safeReturnTo(hostile), '/', String(hostile));
+  }
+});
+
+test('the common dev sign-in route normalizes returnTo before the picker sees it', async () => {
+  const app = devApp();
+  for (const hostile of ['//evil.example', '/\\evil.example', 'https://evil.example/', 'javascript:alert(1)']) {
+    const response = await app.inject(`/auth/login?returnTo=${encodeURIComponent(hostile)}`);
+    assert.equal(response.statusCode, 302);
+    const location = new URL(response.headers.location ?? '', 'https://launch-tracker.invalid');
+    assert.equal(location.pathname, '/auth/dev-login');
+    assert.equal(location.searchParams.get('returnTo'), '/');
   }
 });
 
@@ -221,7 +243,7 @@ test('sign-in goes to the configured tenant with PKCE and no client secret', asy
   const cookie = `${SESSION_COOKIE}=${session?.value ?? ''}`;
   const out = await app.inject({ method: 'POST', url: '/auth/logout', headers: { cookie, ...CSRF } });
   assert.equal(
-    out.json<{ entraLogoutUrl: string }>().entraLogoutUrl,
+    out.json<{ logoutUrl: string }>().logoutUrl,
     `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/logout?post_logout_redirect_uri=${encodeURIComponent(`${ORIGIN}/`)}`,
   );
 });

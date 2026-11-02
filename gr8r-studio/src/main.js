@@ -54,9 +54,13 @@ import './features/archive.js';
 import './actions/teams.js';
 import './actions/subtasks.js';
 import './actions/archive.js';
-import { S, D } from './core/store.js';
+import { request, setUnauthorizedHandler } from './core/api.js';
+import { installAuthSession } from './core/auth-session.js';
+import { S, D, clearOfflineCache } from './core/store.js';
 import { A } from './actions/actions.js';
 import { ROUTE_NAMES, render, go } from './shell/render.js';
+
+installAuthSession({ request, clearOfflineCache, setUnauthorizedHandler });
 
 (function init() {
   document.documentElement.lang = 'en';
@@ -68,7 +72,7 @@ import { ROUTE_NAMES, render, go } from './shell/render.js';
     document.body.appendChild(l);
   }
   const h = (location.hash || '').slice(1);
-  const authRoutes = ['login', 'signup', 'forgot', 'reset', 'verify', 'onboarding'];
+  const authRoutes = ['login', 'onboarding'];
   if (authRoutes.includes(h)) S.ui.auth = h;
   else if (h && ROUTE_NAMES[h]) S.ui.route = h;
   else S.ui.route = S.prefs.home || 'home';

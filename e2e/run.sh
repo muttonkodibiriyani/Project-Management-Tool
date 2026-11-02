@@ -65,7 +65,7 @@ case "$repeat" in '' | *[!0-9]* | 0) fail "--repeat must be a whole number from 
 "$engine" info >/dev/null 2>&1 || fail "$engine is not running. Start it, then run this again."
 
 remove_all() {
-  "$engine" rm -f -v "$NAME-playwright" "$NAME-app" "$NAME-storage" "$NAME-postgres" >/dev/null 2>&1 || true
+  "$engine" rm -f -v "$NAME-playwright" "$NAME-app" "$NAME-migrate" "$NAME-storage" "$NAME-postgres" >/dev/null 2>&1 || true
   "$engine" network rm "$NAME" >/dev/null 2>&1 || true
 }
 
@@ -88,8 +88,9 @@ for ref in "$image" "$POSTGRES_IMAGE" "$AZURITE_IMAGE" "$PLAYWRIGHT_IMAGE"; do
   "$engine" pull --quiet "$ref" >/dev/null || fail "could not download $ref. Check the internet connection, then run this again."
 done
 
-say "Starting PostgreSQL, Blob storage and the app (empty, with throwaway passwords)"
+say "Starting PostgreSQL and Blob storage (empty, with throwaway passwords)"
 db_password=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+app_password=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
 storage_key=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
 "$engine" network create "$NAME" >/dev/null || fail "could not create the $NAME network; the $engine message above says why."
 "$engine" run -d --name "$NAME-postgres" --network "$NAME" --tmpfs /var/lib/postgresql/data \
@@ -107,8 +108,16 @@ until "$engine" exec "$NAME-postgres" pg_isready -q -h 127.0.0.1 -U launchtracke
   fi
   sleep 1
 done
-"$engine" run -d --name "$NAME-app" --network "$NAME" \
+say "Creating the database tables"
+"$engine" exec "$NAME-postgres" psql -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U launchtracker -d launchtracker \
+  -c "create role lt_app login password '$app_password'" >/dev/null ||
+  fail "could not create the app's database role; the PostgreSQL message above says why."
+"$engine" run --rm --name "$NAME-migrate" --network "$NAME" \
   -e PGHOST="$NAME-postgres" -e PGDATABASE=launchtracker -e PGUSER=launchtracker -e PGPASSWORD="$db_password" -e PGSSLMODE=disable \
+  "$image" dist/migrate.js || fail "the migration failed; the message above says why."
+say "Starting Launch Tracker"
+"$engine" run -d --name "$NAME-app" --network "$NAME" \
+  -e PGHOST="$NAME-postgres" -e PGDATABASE=launchtracker -e PGUSER=lt_app -e PGPASSWORD="$app_password" -e PGSSLMODE=disable \
   -e BLOB_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=launchtracker;AccountKey=$storage_key;BlobEndpoint=http://$NAME-storage:10000/launchtracker;" \
   -e BLOB_CONTAINER=launch-tracker -e AUTH_MODE=dev \
   "$image" >/dev/null || fail "the app did not start; the $engine message above says why."
@@ -121,9 +130,10 @@ set -- npx playwright test --repeat-each "$repeat"
 # The suite installs its own locked packages inside the container, into a tmpfs the host never sees,
 # and runs as the host user so the report and traces it writes stay the host user's files.
 if ! "$engine" run --rm --name "$NAME-playwright" --network "$NAME" --init --shm-size 1g \
-  --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI="${CI:-}" -e NPM_CONFIG_UPDATE_NOTIFIER=false -e BASE_URL="http://$NAME-app:8080" \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI="${CI:-}" -e NPM_CONFIG_UPDATE_NOTIFIER=false \
+  -e APP_HOST="$NAME-app" -e BASE_URL=http://127.0.0.1:8080 \
   -v "$E2E_DIR:/e2e" --tmpfs /e2e/node_modules:exec,mode=1777 -w /e2e \
-  "$PLAYWRIGHT_IMAGE" sh -c 'npm ci --ignore-scripts --no-audit --no-fund --loglevel=error && "$@"' sh "$@"; then
+  "$PLAYWRIGHT_IMAGE" sh -c "npm ci --ignore-scripts --no-audit --no-fund --loglevel=error || exit; node loopback-proxy.mjs & proxy=\$!; trap 'kill \"\$proxy\" 2>/dev/null || true' EXIT INT TERM; \"\$@\"" sh "$@"; then
   printf '\nApp log (last 50 lines):\n' >&2
   "$engine" logs --tail 50 "$NAME-app" >&2 || true
   fail "the suite did not pass; the output above says which test failed, or why the runner could not start. For a failed test, open e2e/playwright-report/index.html, or its trace with: npx playwright show-trace e2e/test-results/<test>/trace.zip"
