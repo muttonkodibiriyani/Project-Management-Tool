@@ -240,6 +240,62 @@ const changed = (before, after, fields) =>
   Object.fromEntries(fields.filter(field => !same(before?.[field], after?.[field])).map(field => [field, after[field]]));
 const versionOf = row => row?.version;
 
+/**
+ * Replace offline-only ids with the durable ids returned by successful creates.
+ * A restart re-bootstraps server rows before rebuilding an outbox diff. Without
+ * this seam the accepted server row looks deleted while its local-id twin looks
+ * newly created, so the resumed diff can delete the accepted row.
+ */
+function reconcileSnapshotIds(snapshot, mappings = {}) {
+  if (!snapshot || Object.keys(mappings).length === 0) return snapshot;
+  const next = json(snapshot);
+  const mapped = value => (value === null || value === undefined ? value : mappings[String(value)] || value);
+  const mapList = values => (Array.isArray(values) ? values.map(mapped) : values);
+
+  for (const project of next.projects || []) project.id = mapped(project.id);
+  for (const task of next.tasks || []) {
+    task.id = mapped(task.id);
+    task.project = mapped(task.project);
+    task.projectId = mapped(task.projectId);
+    task.followsUpId = mapped(task.followsUpId);
+    if (task.followUpOf) task.followUpOf.task = mapped(task.followUpOf.task);
+    task.deps = mapList(task.deps);
+    task.dependencyIds = mapList(task.dependencyIds);
+    for (const subtask of task.subtasks || []) {
+      subtask.id = mapped(subtask.id);
+      subtask.taskId = mapped(subtask.taskId);
+    }
+    for (const lineStore of task.lineStores || []) lineStore.taskId = mapped(lineStore.taskId);
+  }
+  for (const comment of next.comments || []) {
+    comment.id = mapped(comment.id);
+    comment.task = mapped(comment.task);
+    comment.taskId = mapped(comment.taskId);
+    comment.followUpTaskId = mapped(comment.followUpTaskId);
+  }
+  for (const event of next.events || []) {
+    event.id = mapped(event.id);
+    event.project = mapped(event.project);
+    event.projectId = mapped(event.projectId);
+  }
+  for (const view of next.savedViews || []) {
+    view.id = mapped(view.id);
+    view.project = mapped(view.project);
+    view.projectId = mapped(view.projectId);
+  }
+  for (const file of next.files || []) {
+    file.project = mapped(file.project);
+    file.projectId = mapped(file.projectId);
+    file.task = mapped(file.task);
+    file.taskId = mapped(file.taskId);
+  }
+  for (const notification of next.notifs || next.notifications || []) {
+    notification.task = mapped(notification.task);
+    notification.taskId = mapped(notification.taskId);
+  }
+  return next;
+}
+
 function projectBody(project, create) {
   const body = {
     name: project.name,
@@ -622,13 +678,56 @@ export function createSync({
           pending.revalidate = false;
           persist();
         }
+        const reconciled = reconcileSnapshotIds(pending.snapshot, state.idMap);
+        if (reconciled !== pending.snapshot && !same(reconciled, pending.snapshot)) {
+          pending.snapshot = reconciled;
+          persist();
+        }
         const before = toLegacyData(state.base, profile, null, sessions);
         const operations = buildMutations(before, pending.snapshot, profile.prefs, pending.prefs);
         const completed = new Set(pending.completed || []);
+        const acceptedRows = new Set();
+        const acceptedFollowUps = new Set(
+          [...completed]
+            .filter(value => value.startsWith('followUp:create:'))
+            .map(value => resolve(value.slice('followUp:create:'.length)))
+            .map(String),
+        );
+        const baselineComments = new Set(pending.baseline?.comments || []);
         for (const operation of operations) {
           const operationId = operationKey(operation);
           if (completed.has(operationId)) continue;
+          const resolvedId = resolve(operation.row?.id);
+          const generatedFollowUpComment =
+            operation.resource === 'comment' &&
+            ((operation.action === 'create' && acceptedFollowUps.has(String(resolve(operation.row.followUpTaskId)))) ||
+              (operation.action === 'delete' && acceptedFollowUps.size > 0 && !baselineComments.has(String(operation.row.id))));
+          if (generatedFollowUpComment) {
+            // The atomic follow-up route owns its generated comment. A resumed
+            // snapshot still contains the local placeholder while bootstrap has
+            // the server comment, so neither is a standalone client mutation.
+            completed.add(operationId);
+            pending.completed = [...completed];
+            persist();
+            continue;
+          }
+          if (operation.action === 'delete' && acceptedRows.has(`${operation.resource}:${resolvedId}`)) {
+            // An ambiguous create can be returned by the server's idempotency record
+            // after this diff was planned. Its remote twin was classified as a delete
+            // before the local id was known; never execute that stale delete.
+            completed.add(operationId);
+            pending.completed = [...completed];
+            persist();
+            continue;
+          }
+          const localId = operation.row?.id;
           await call(operation);
+          const remoteId = localId === null || localId === undefined ? undefined : state.idMap[String(localId)];
+          if (operation.action === 'create' && remoteId) {
+            const resource = operation.resource === 'followUp' ? 'task' : operation.resource;
+            acceptedRows.add(`${resource}:${remoteId}`);
+            if (operation.resource === 'followUp') acceptedFollowUps.add(String(remoteId));
+          }
           completed.add(operationId);
           pending.completed = [...completed];
           persist();
@@ -654,7 +753,13 @@ export function createSync({
 
   function queueSnapshot({ data, prefs }) {
     if (!state) return;
-    const pending = { id: `${Date.now()}-${Math.random()}`, snapshot: withoutRestricted(data), prefs: json(prefs), completed: [] };
+    const pending = {
+      id: `${Date.now()}-${Math.random()}`,
+      snapshot: withoutRestricted(data),
+      prefs: json(prefs),
+      completed: [],
+      baseline: { comments: (state.base.comments || []).map(comment => String(comment.id)) },
+    };
     state.outbox = flushing && state.outbox.length ? [state.outbox[0], pending] : [pending];
     persist();
     queueMicrotask(() => void flush());

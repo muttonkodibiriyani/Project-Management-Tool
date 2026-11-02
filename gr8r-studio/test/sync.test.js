@@ -385,6 +385,265 @@ test('partial outbox success is checkpointed and does not replay an accepted edi
   assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
 });
 
+test('an accepted create keeps its server identity when a later edit resumes after restart', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let projectCreates = 0;
+  let projectDeletes = 0;
+  let taskPatches = 0;
+  let failTask = true;
+  let visible;
+  const statuses = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/projects' && options.method === 'POST') {
+      projectCreates += 1;
+      const created = { id: 'server-project', version: 1, ...options.body, memberIds: [], favourite: false };
+      serverBoot.projects.push(created);
+      return { data: structuredClone(created) };
+    }
+    if (path === '/api/v1/w/synthetic/projects/server-project' && options.method === 'DELETE') {
+      projectDeletes += 1;
+      serverBoot.projects = serverBoot.projects.filter(project => project.id !== 'server-project');
+      return { data: null };
+    }
+    if (path === '/api/v1/w/synthetic/tasks/task-1' && options.method === 'PATCH') {
+      taskPatches += 1;
+      if (failTask) throw new Error('The connection dropped after the project create.');
+      serverBoot.tasks[0] = { ...serverBoot.tasks[0], ...options.body, version: 2 };
+      return { data: structuredClone(serverBoot.tasks[0]) };
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.projects.push({
+    id: 'local-project',
+    key: 'NEW',
+    name: 'Created before interruption',
+    kind: 'general',
+    color: 'indigo',
+    status: 'planning',
+    members: [],
+  });
+  next.tasks[0].title = 'Pending after create';
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  const interrupted = JSON.parse(storage.getItem(pointer.key));
+  assert.equal(interrupted.idMap['local-project'], 'server-project');
+  assert.ok(interrupted.outbox[0].completed.includes('project:create:local-project'));
+  first.stop();
+
+  failTask = false;
+  const second = createSync(options);
+  await second.start();
+  second.stop();
+
+  assert.equal(projectCreates, 1, 'the accepted create is not repeated');
+  assert.equal(projectDeletes, 0, 'the accepted remote row is not mistaken for a deletion');
+  assert.equal(taskPatches, 2, 'only the interrupted edit is retried');
+  assert.ok(serverBoot.projects.some(project => project.id === 'server-project'));
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
+test('an ambiguous create retry never executes the stale remote-twin delete', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let projectPosts = 0;
+  let serverCreates = 0;
+  let projectDeletes = 0;
+  let dropCreateResponse = true;
+  let visible;
+  const statuses = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/projects' && options.method === 'POST') {
+      projectPosts += 1;
+      let created = serverBoot.projects.find(project => project.id === 'server-project');
+      if (!created) {
+        serverCreates += 1;
+        created = { id: 'server-project', version: 1, ...options.body, memberIds: [], favourite: false };
+        serverBoot.projects.push(created);
+      }
+      if (dropCreateResponse) throw new Error('The response was lost after the server accepted the create.');
+      return { data: structuredClone(created) };
+    }
+    if (path === '/api/v1/w/synthetic/projects/server-project' && options.method === 'DELETE') {
+      projectDeletes += 1;
+      serverBoot.projects = serverBoot.projects.filter(project => project.id !== 'server-project');
+      return { data: null };
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.projects.push({ id: 'local-project', key: 'NEW', name: 'Ambiguous create', kind: 'general', color: 'indigo', status: 'planning', members: [] });
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  first.stop();
+
+  dropCreateResponse = false;
+  const second = createSync(options);
+  await second.start();
+  second.stop();
+
+  assert.equal(projectPosts, 2, 'the stable idempotency key retries the ambiguous request once');
+  assert.equal(serverCreates, 1, 'the server accepts only one create');
+  assert.equal(projectDeletes, 0, 'the preplanned delete of the remote twin is suppressed');
+  assert.ok(serverBoot.projects.some(project => project.id === 'server-project'));
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
+test('an accepted atomic follow-up keeps its server-owned children when a later preference edit resumes', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let serverProfile = structuredClone(PROFILE);
+  let followUpCreates = 0;
+  let commentWrites = 0;
+  let preferencePatches = 0;
+  let failPreference = true;
+  let visible;
+  const statuses = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me' && !options.method) return { data: structuredClone(serverProfile) };
+    if (path === '/api/v1/me' && options.method === 'PATCH') {
+      preferencePatches += 1;
+      if (failPreference) throw new Error('The connection dropped after the follow-up was accepted.');
+      serverProfile = { ...serverProfile, prefs: options.body.prefs, user: { ...serverProfile.user, version: 3 } };
+      return { data: structuredClone(serverProfile) };
+    }
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/tasks/task-1/follow-ups' && options.method === 'POST') {
+      followUpCreates += 1;
+      const task = {
+        id: 'server-follow-up',
+        version: 1,
+        key: 'SYN-2',
+        kind: 'follow_up',
+        projectId: 'project-1',
+        title: options.body.title,
+        status: 'todo',
+        priority: 'medium',
+        assigneeId: options.body.assigneeId,
+        dueDate: options.body.dueDate,
+        description: options.body.note,
+        followsUpId: 'task-1',
+        followsUpGate: options.body.gate,
+        subtasks: [],
+        dependencyIds: [],
+        attachmentIds: [],
+      };
+      serverBoot.tasks.push(task);
+      serverBoot.comments.push({
+        id: 'server-follow-up-comment',
+        version: 1,
+        taskId: 'task-1',
+        authorId: 'user-1',
+        body: '<p>Follow-up SYN-2: synthetic</p>',
+        reactions: [],
+        createdAt: '2026-11-02T12:00:00.000Z',
+      });
+      serverBoot.notifications.push({
+        id: 'server-follow-up-notification',
+        version: 1,
+        userId: 'user-1',
+        actorId: 'user-1',
+        taskId: task.id,
+        type: 'follow_up',
+        text: 'asked you to follow up SYN-1',
+        createdAt: '2026-11-02T12:00:00.000Z',
+      });
+      return { data: structuredClone(task) };
+    }
+    if (path.includes('/comments/') && ['POST', 'DELETE'].includes(options.method)) {
+      commentWrites += 1;
+      return { data: null };
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  persistFollowUp({
+    data: next,
+    line: next.tasks[0],
+    gate: { key: 'vm_dressed', name: 'VM dressed' },
+    owner: 'user-1',
+    ownerName: 'Synthetic User',
+    due: '2026-11-05',
+    note: 'Check the display',
+    by: 'user-1',
+    now: Date.parse('2026-11-02T12:00:00Z'),
+    today: '2026-11-02',
+    ids: { task: 'local-follow-up', comment: 'local-comment', notification: 'local-notification' },
+    key: 'SYN-2',
+  });
+  first.queueSnapshot({ data: next, prefs: { theme: 'light' } });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  first.stop();
+
+  failPreference = false;
+  const second = createSync(options);
+  await second.start();
+  second.stop();
+
+  assert.equal(followUpCreates, 1);
+  assert.equal(commentWrites, 0, 'the local placeholder and server-generated comment are never separate writes');
+  assert.equal(preferencePatches, 2);
+  assert.ok(serverBoot.comments.some(comment => comment.id === 'server-follow-up-comment'));
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
 test('a local follow-up uses the atomic server route and suppresses synthetic child writes', async () => {
   const storage = new MemoryStorage();
   const calls = [];
