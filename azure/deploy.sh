@@ -303,23 +303,29 @@ Nothing in Azure was changed. Deploy main's image from after both tasks merge (r
 # The app consumes exactly these ID-token claims and group-capable app roles. Keeping the manifest
 # check here makes a broken identity registration fail before a revision is changed.
 check_entra_application() {
-  local app=$1 actual expected
+  local app=$1 credential=${2:-} actual expected
   entra_line "$(printf '%s' "$app" | jq -r '[.optionalClaims.idToken[]?.name] | unique | sort | join(" ")')" "acct email" \
     "the ID token has exactly the optional acct and email claims"
+  entra_line "$(printf '%s' "$app" | jq -r '.groupMembershipClaims // "None"')" None \
+    "groupMembershipClaims is absent or None, so no raw groups claim is emitted"
   entra_line "$(printf '%s' "$app" | jq -r '[(.web.implicitGrantSettings.enableIdTokenIssuance // false), (.web.implicitGrantSettings.enableAccessTokenIssuance // false)] | join(" ")')" \
     "false false" "implicit ID-token and access-token grants are disabled"
   actual=$(printf '%s' "$app" | jq -r \
     '[.appRoles[]? | [.value, (.isEnabled | tostring), ((.allowedMemberTypes // []) | unique | sort | join(","))] | join("|")] | sort | join(";")')
   expected="BrandTeam|true|User;Comms|true|User;Launch.Manager|true|User;Supply|true|User;VM|true|User;Viewer|true|User;Workspace.Admin|true|User"
   entra_line "$actual" "$expected" "exactly the seven enabled User (users/groups) app roles are defined"
+  if [ "$credential" = managed-identity ]; then
+    entra_line "$(printf '%s' "$app" | jq -r '(.keyCredentials // []) | length')" 0 \
+      "managed identity has no certificate credential as an alternate client-authentication path"
+  fi
 }
 
 check_federated_credential() {
   local credentials=$1 principal=$2 issuer
   issuer="https://login.microsoftonline.com/$LZ_ENTRA_TENANT_ID/v2.0"
   entra_line "$(printf '%s' "$credentials" | jq -r --arg subject "$principal" --arg issuer "$issuer" \
-    '[.[] | select(.subject == $subject and .issuer == $issuer and .audiences == ["api://AzureADTokenExchange"])] | length')" \
-    1 "exactly one federated credential trusts id-lt-app with the Entra token-exchange audience"
+    'length == 1 and .[0].subject == $subject and .[0].issuer == $issuer and .[0].audiences == ["api://AzureADTokenExchange"]')" \
+    true "the only federated credential trusts id-lt-app with the exact issuer and token-exchange audience"
 }
 
 # Sign-in: assignment required, no client secret, exact token contract, the redirect URI registered
@@ -332,7 +338,7 @@ check_entra() {
   entra_line "$(printf '%s' "$sp" | jq -r .appRoleAssignmentRequired)" true "the enterprise application requires assignment"
   entra_line "$(printf '%s' "$app" | jq -r .signInAudience)" AzureADMyOrg "the app registration is single tenant"
   entra_line "$(printf '%s' "$app" | jq -r '.passwordCredentials | length')" 0 "the app registration has no client secret"
-  check_entra_application "$app"
+  check_entra_application "$app" "$LZ_ENTRA_CREDENTIAL"
   uri=$(redirect_uri)
   if [ -n "$uri" ]; then
     entra_line "$(printf '%s' "$app" | jq -r --arg uri "$uri" '.web.redirectUris | index($uri) != null')" true "the redirect URI $uri is registered"

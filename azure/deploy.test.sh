@@ -41,29 +41,50 @@ expect_failures() {
 
 valid_app=$(jq -n '{
   optionalClaims: {idToken: [{name: "email"}, {name: "acct"}]},
+  groupMembershipClaims: "None",
   web: {implicitGrantSettings: {enableIdTokenIssuance: false, enableAccessTokenIssuance: false}},
   appRoles: (["Workspace.Admin", "Launch.Manager", "BrandTeam", "Supply", "VM", "Comms", "Viewer"]
     | map({value: ., isEnabled: true, allowedMemberTypes: ["User"]}))
 }')
-expect_success "Entra manifest accepts the exact token claims, grants and roles" check_entra_application "$valid_app"
+expect_success "Entra manifest accepts the exact token claims, grants and roles" check_entra_application "$valid_app" managed-identity
+
+without_group_claim=$(printf '%s' "$valid_app" | jq 'del(.groupMembershipClaims)')
+expect_success "Entra manifest accepts an absent groupMembershipClaims setting" \
+  check_entra_application "$without_group_claim" managed-identity
 
 invalid_app=$(printf '%s' "$valid_app" | jq '
   .optionalClaims.idToken = [{name: "email"}]
   | .web.implicitGrantSettings.enableIdTokenIssuance = true
   | .appRoles = [.appRoles[] | select(.value != "Viewer")]
 ')
-expect_failures 3 "Entra manifest rejects a missing claim, implicit grant and missing role" check_entra_application "$invalid_app"
+expect_failures 3 "Entra manifest rejects a missing claim, implicit grant and missing role" check_entra_application "$invalid_app" managed-identity
+
+raw_groups=$(printf '%s' "$valid_app" | jq '.groupMembershipClaims = "All"')
+expect_failures 1 "Entra manifest rejects a raw groups claim" check_entra_application "$raw_groups" managed-identity
+
+certificate_path=$(printf '%s' "$valid_app" | jq '.keyCredentials = [{keyId: "alternate-certificate"}]')
+expect_failures 1 "managed identity rejects an alternate certificate credential" \
+  check_entra_application "$certificate_path" managed-identity
 
 LZ_ENTRA_TENANT_ID=00000000-0000-0000-0000-000000000001
 principal=00000000-0000-0000-0000-000000000002
 valid_credentials=$(jq -n --arg subject "$principal" --arg issuer "https://login.microsoftonline.com/$LZ_ENTRA_TENANT_ID/v2.0" '[
-  {subject: $subject, issuer: $issuer, audiences: ["api://AzureADTokenExchange"]},
-  {subject: "unrelated", issuer: $issuer, audiences: ["api://AzureADTokenExchange"]}
+  {subject: $subject, issuer: $issuer, audiences: ["api://AzureADTokenExchange"]}
 ]')
 expect_success "managed-identity federation accepts the exact issuer, subject and audience" check_federated_credential "$valid_credentials" "$principal"
 
 wrong_audience=$(printf '%s' "$valid_credentials" | jq '.[0].audiences = ["api://wrong"]')
 expect_failures 1 "managed-identity federation rejects the wrong audience" check_federated_credential "$wrong_audience" "$principal"
+
+alternate_audience=$(printf '%s' "$valid_credentials" | jq --arg subject "$principal" \
+  '. + [{subject: $subject, issuer: .[0].issuer, audiences: ["api://unexpected"]}]')
+expect_failures 1 "managed-identity federation rejects a second alternate-audience credential" \
+  check_federated_credential "$alternate_audience" "$principal"
+
+alternate_subject=$(printf '%s' "$valid_credentials" | jq \
+  '. + [{subject: "unrelated", issuer: .[0].issuer, audiences: ["api://AzureADTokenExchange"]}]')
+expect_failures 1 "managed-identity federation rejects a second credential for another subject" \
+  check_federated_credential "$alternate_subject" "$principal"
 
 connections_fixture='[]'
 zones_fixture='[]'
