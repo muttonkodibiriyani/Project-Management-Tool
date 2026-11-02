@@ -57,7 +57,7 @@ test('migrations build the whole schema in an empty database, and a second run a
   const db = await emptyDatabase(t);
   const owner = await db.connect();
 
-  assert.deepEqual(await migrate(owner, () => undefined), ['0001_init']);
+  assert.deepEqual(await migrate(owner, () => undefined), ['0001_init', '0002_import_store_map']);
   const { rows: tables } = await owner.query<{ name: string }>(
     "select table_name as name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE' order by 1",
   );
@@ -75,8 +75,21 @@ test('migrations build the whole schema in an empty database, and a second run a
   const { rows: applied } = await owner.query<{ name: string }>('select name from migrations.pgmigrations');
   assert.deepEqual(
     applied.map(row => row.name),
-    ['0001_init'],
+    ['0001_init', '0002_import_store_map'],
   );
+  const { rows: storeMap } = await owner.query<{ type: string; nullable: string; fallback: string }>(
+    `select data_type as type, is_nullable as nullable, column_default as fallback
+       from information_schema.columns where table_name = 'import_job' and column_name = 'store_map'`,
+  );
+  assert.deepEqual(storeMap, [{ type: 'jsonb', nullable: 'NO', fallback: "'{}'::jsonb" }]);
+  const job = await owner.query(`
+    with w as (insert into workspace (slug, name) values ('synthetic-ws', 'Synthetic') returning id),
+         u as (insert into app_user (email, name) values ('importer@example.test', 'Importer') returning id),
+         f as (insert into file (workspace_id, name, content_type, size_bytes, sha256, blob_container, blob_name, uploaded_by)
+               select w.id, 'synthetic.xlsx', 'application/octet-stream', 0, '', 'imports', 'synthetic/blob', u.id from w, u returning id, workspace_id, uploaded_by)
+    insert into import_job (workspace_id, file_id, created_by) select workspace_id, id, uploaded_by from f returning store_map`);
+  assert.deepEqual(job.rows, [{ store_map: {} }]);
+  await assert.rejects(owner.query("update import_job set store_map = '[]'::jsonb"), { code: '23514' });
 });
 
 test('every update moves a row onto the change feed', async t => {
