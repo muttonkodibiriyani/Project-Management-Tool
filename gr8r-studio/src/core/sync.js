@@ -414,6 +414,71 @@ export function createSync({
       row: json(response.data),
     };
   };
+  const changedFieldsMatch = (before, desired, current, fields) =>
+    fields.filter(field => !same(before?.[field], desired?.[field])).every(field => same(current?.[field], desired?.[field]));
+  const eventBody = row => ({
+    projectId: resolve(row?.project || row?.projectId) || null,
+    title: row?.title,
+    date: row?.date,
+    timeText: row?.time || row?.timeText || null,
+  });
+  const viewBody = row => ({
+    name: row?.name,
+    type: row?.type || 'list',
+    config: { filters: row?.filters || [], sort: row?.sort, group: row?.group, columns: row?.columns },
+    projectId: resolve(row?.project || row?.projectId) || null,
+  });
+  // A transport failure is ambiguous: the guarded write may already be committed.
+  // Only a fresh canonical snapshot may prove the intended field changes (or delete)
+  // landed; otherwise the original ETag remains authoritative.
+  const reconciledMutation = operation => {
+    if (!state?.base || operation.action === 'create' || operation.resource === 'followUp') return null;
+    if (operation.resource === 'prefs') return same(profile.prefs, operation.row) ? { applied: true, row: null } : null;
+    const currentData = toLegacyData(state.base, profile, null, sessions);
+    const id = String(resolve(operation.row?.id));
+    let current;
+    let matches = false;
+    if (operation.resource === 'project') {
+      current = currentData.projects.find(row => String(row.id) === id);
+      if (current)
+        matches = changedFieldsMatch(
+          projectBody(operation.before, false),
+          projectBody(operation.row, false),
+          projectBody(current, false),
+          Object.keys(projectBody(operation.row, false)),
+        );
+    } else if (operation.resource === 'task') {
+      current = currentData.tasks.find(row => String(row.id) === id);
+      if (current)
+        matches = changedFieldsMatch(
+          taskBody(operation.before, false, resolve),
+          taskBody(operation.row, false, resolve),
+          taskBody(current, false, resolve),
+          Object.keys(taskBody(operation.row, false, resolve)),
+        );
+    } else if (operation.resource === 'comment') {
+      current = currentData.comments.find(row => String(row.id) === id);
+      if (current) matches = changedFieldsMatch(operation.before, operation.row, current, ['text']);
+    } else if (operation.resource === 'subtask') {
+      current = currentData.tasks.flatMap(task => task.subtasks || []).find(row => String(row.id) === id);
+      if (current) matches = changedFieldsMatch(operation.before, operation.row, current, ['title', 'done', 'position']);
+    } else if (operation.resource === 'event') {
+      current = currentData.events.find(row => String(row.id) === id);
+      if (current)
+        matches = changedFieldsMatch(eventBody(operation.before), eventBody(operation.row), eventBody(current), Object.keys(eventBody(operation.row)));
+    } else if (operation.resource === 'view') {
+      current = currentData.savedViews.find(row => String(row.id) === id);
+      if (current) matches = changedFieldsMatch(viewBody(operation.before), viewBody(operation.row), viewBody(current), ['name', 'type', 'config']);
+    } else if (operation.resource === 'notification') {
+      current = currentData.notifs.find(row => String(row.id) === id);
+      if (current) matches = changedFieldsMatch(operation.before, operation.row, current, ['read', 'archived']);
+    } else return null;
+    if (operation.action === 'delete') {
+      if (!current) return { applied: true, row: null };
+    } else if (matches) return { applied: true, row: current };
+    if (!current || current.version !== etagFor(operation)) return { conflict: true, row: current || null };
+    return null;
+  };
 
   const persist = () => {
     if (!state || !key) return;
@@ -655,10 +720,12 @@ export function createSync({
     try {
       while (state.outbox.length) {
         const pending = state.outbox[0];
+        let revalidated = false;
         if (pending.revalidate) {
           await bootstrap({ publishData: false });
-          pending.revalidate = false;
-          persist();
+          // Keep this flag durable until the whole plan is removed. A crash between
+          // revalidation and checkpointing must revalidate again, never replay blind.
+          revalidated = true;
         }
         // This plan was captured against the state the user actually edited. Never
         // rebuild it from a stale snapshot after bootstrap: doing so could invent a
@@ -668,6 +735,20 @@ export function createSync({
         for (const operation of operations) {
           const operationId = operationKey(operation);
           if (completed.has(operationId)) continue;
+          const reconciled = revalidated ? reconciledMutation(operation) : null;
+          if (reconciled?.applied) {
+            if (reconciled.row) checkpointRow(operation, { data: reconciled.row });
+            completed.add(operationId);
+            pending.completed = [...completed];
+            persist();
+            continue;
+          }
+          if (reconciled?.conflict)
+            throw Object.assign(new Error('This item changed while your edit was offline. Review the current version before saving again.'), {
+              status: 409,
+              code: 'version_conflict',
+              current: reconciled.row,
+            });
           await call(operation);
           completed.add(operationId);
           pending.completed = [...completed];

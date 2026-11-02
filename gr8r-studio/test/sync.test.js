@@ -385,6 +385,271 @@ test('partial outbox success is checkpointed and does not replay an accepted edi
   assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
 });
 
+test('accepted project, task and comment edits survive lost responses and resume later work', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let serverProfile = structuredClone(PROFILE);
+  let visible;
+  const statuses = [];
+  const attempts = { project: 0, task: 0, comment: 0, prefs: 0 };
+  const semanticWrites = { project: 0, task: 0, comment: 0 };
+  const etags = { project: [], task: [], comment: [] };
+  const loseResponse = { project: true, task: true, comment: true };
+  const applyThenLose = (resource, rows, id, body) => {
+    attempts[resource] += 1;
+    etags[resource].push(body.etag);
+    const current = rows.find(row => row.id === id);
+    if (body.etag !== current.version) throw Object.assign(new Error(`${resource} version conflict.`), { status: 409 });
+    semanticWrites[resource] += 1;
+    Object.assign(current, body.patch, { version: current.version + 1 });
+    if (loseResponse[resource]) {
+      loseResponse[resource] = false;
+      throw new Error(`The ${resource} response was lost after server acceptance.`);
+    }
+    return { data: structuredClone(current) };
+  };
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me' && !options.method) return { data: structuredClone(serverProfile) };
+    if (path === '/api/v1/me' && options.method === 'PATCH') {
+      attempts.prefs += 1;
+      serverProfile = { ...serverProfile, prefs: options.body.prefs, user: { ...serverProfile.user, version: serverProfile.user.version + 1 } };
+      return { data: structuredClone(serverProfile) };
+    }
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/projects/project-1' && options.method === 'PATCH')
+      return applyThenLose('project', serverBoot.projects, 'project-1', { etag: options.etag, patch: options.body });
+    if (path === '/api/v1/w/synthetic/tasks/task-1' && options.method === 'PATCH')
+      return applyThenLose('task', serverBoot.tasks, 'task-1', { etag: options.etag, patch: options.body });
+    if (path === '/api/v1/w/synthetic/comments/comment-1' && options.method === 'PATCH')
+      return applyThenLose('comment', serverBoot.comments, 'comment-1', { etag: options.etag, patch: { body: options.body.body } });
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.projects[0].name = 'Accepted project edit';
+  next.tasks[0].title = 'Accepted task edit';
+  next.comments[0].text = 'Accepted comment edit';
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  const final = structuredClone(next);
+  final.projects[0].name = 'Final project edit';
+  final.tasks[0].title = 'Final task edit';
+  final.comments[0].text = 'Final comment edit';
+  first.queueSnapshot({ data: final, prefs: { theme: 'light' } });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  first.stop();
+
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  for (let restart = 0; restart < 3; restart += 1) {
+    const resumed = createSync(options);
+    await resumed.start();
+    resumed.stop();
+  }
+
+  assert.deepEqual(attempts, { project: 2, task: 2, comment: 2, prefs: 1 });
+  assert.deepEqual(semanticWrites, { project: 2, task: 2, comment: 2 });
+  assert.deepEqual(etags, { project: [1, 2], task: [1, 2], comment: [1, 2] });
+  assert.equal(serverBoot.projects[0].name, 'Final project edit');
+  assert.equal(serverBoot.tasks[0].title, 'Final task edit');
+  assert.equal(serverBoot.comments[0].body, 'Final comment edit');
+  assert.deepEqual(serverProfile.prefs, { theme: 'light' }, 'later edits use the reconciled versions and still complete');
+  const completed = JSON.parse(storage.getItem(pointer.key));
+  assert.deepEqual(completed.outbox, []);
+  assert.deepEqual(completed.rowCheckpoints, {});
+});
+
+test('an accepted delete with a lost response is completed from canonical absence after restart', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let visible;
+  let deleteAttempts = 0;
+  let semanticDeletes = 0;
+  const statuses = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/comments/comment-1' && options.method === 'DELETE') {
+      deleteAttempts += 1;
+      const current = serverBoot.comments.find(comment => comment.id === 'comment-1');
+      if (options.etag !== current?.version) throw Object.assign(new Error('Comment version conflict.'), { status: 409 });
+      semanticDeletes += 1;
+      serverBoot.comments = serverBoot.comments.filter(comment => comment.id !== 'comment-1');
+      throw new Error('The delete response was lost after server acceptance.');
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.comments = [];
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  first.stop();
+
+  const resumed = createSync(options);
+  await resumed.start();
+  resumed.stop();
+
+  assert.equal(deleteAttempts, 1);
+  assert.equal(semanticDeletes, 1);
+  assert.equal(serverBoot.comments.length, 0);
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
+test('a concurrent change after an ambiguous edit remains a version conflict', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let visible;
+  let patchAttempts = 0;
+  let dropBeforeApply = true;
+  const statuses = [];
+  const conflicts = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/projects/project-1' && options.method === 'PATCH') {
+      patchAttempts += 1;
+      if (dropBeforeApply) {
+        dropBeforeApply = false;
+        throw new Error('The request was lost before the server applied it.');
+      }
+      throw new Error('The stale patch must not be retried.');
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    onConflict: error => conflicts.push(error),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.projects[0].name = 'My pending edit';
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  first.stop();
+
+  serverBoot.projects[0] = { ...serverBoot.projects[0], name: 'Changed by another user', version: 2 };
+  const resumed = createSync(options);
+  await resumed.start();
+  resumed.stop();
+
+  assert.equal(patchAttempts, 1, 'a freshly detected version conflict never retries the stale write');
+  assert.equal(conflicts.length, 1);
+  assert.equal(conflicts[0].status, 409);
+  assert.equal(serverBoot.projects[0].name, 'Changed by another user');
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  assert.equal(JSON.parse(storage.getItem(pointer.key)).outbox.length, 1, 'the conflict remains available for user resolution');
+});
+
+test('an accepted notification edit with a lost response reconciles after restart', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  serverBoot.notifications = [
+    {
+      id: 'notification-1',
+      version: 1,
+      userId: 'user-1',
+      actorId: 'user-1',
+      taskId: 'task-1',
+      type: 'assignment',
+      text: 'Synthetic notification',
+      readAt: null,
+      archived: false,
+      createdAt: '2026-11-02T12:00:00.000Z',
+    },
+  ];
+  let visible;
+  let patchAttempts = 0;
+  const statuses = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/me/notifications/notification-1' && options.method === 'PATCH') {
+      patchAttempts += 1;
+      const current = serverBoot.notifications[0];
+      if (options.etag !== current.version) throw Object.assign(new Error('Notification version conflict.'), { status: 409 });
+      Object.assign(current, {
+        readAt: options.body.read ? '2026-11-02T12:30:00.000Z' : null,
+        archived: options.body.archived,
+        version: current.version + 1,
+      });
+      throw new Error('The notification response was lost after server acceptance.');
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.notifs[0].read = true;
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  first.stop();
+
+  const resumed = createSync(options);
+  await resumed.start();
+  resumed.stop();
+
+  assert.equal(patchAttempts, 1);
+  assert.equal(serverBoot.notifications[0].version, 2);
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
 test('a resumed edit never invents a delete for a concurrent remote create', async () => {
   const storage = new MemoryStorage();
   let serverBoot = structuredClone(BOOT);
