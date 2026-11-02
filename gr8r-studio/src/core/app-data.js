@@ -1,7 +1,7 @@
 /* ---------- store installation seam (called after auth-session installation) ---------- */
 
 import { request, workspacePath } from './api.js';
-import { emptyData, registerSync, replaceStoreData, S } from './store.js';
+import { clearCompatibilityUi, DEFAULT_PREFS, emptyData, registerSync, replaceStoreData, S } from './store.js';
 import { startSync } from './sync.js';
 
 /**
@@ -13,8 +13,10 @@ export async function installDataSync({ render = () => {}, preferredWorkspace, o
   // it before the first request, await, callback or render so a 401/offline/bootstrap failure is
   // fail-closed and can never expose the compatibility data on a protected page.
   registerSync(null);
-  replaceStoreData(emptyData());
+  clearCompatibilityUi();
+  replaceStoreData(emptyData(), DEFAULT_PREFS);
   S.authorized.launchDirectory = null;
+  S.ui.collapsed = false;
   S.ui.loading = true;
   S.ui.offline = false;
 

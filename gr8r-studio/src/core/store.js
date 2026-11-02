@@ -7,6 +7,8 @@ import { syntheticLaunchDirectory } from '../data/launch-seed.js';
 export const STORE_KEY = 'gr8r.v2';
 export const CACHE_POINTER_KEY = 'lt.cache.active';
 export const CACHE_PREFIX = 'lt.cache.v1:';
+export const COMPAT_UI_KEY = 'lt.compat.ui.v1';
+const COMPAT_PREF_KEYS = ['theme', 'accent', 'side', 'density', 'weekStart', 'dateFmt', 'lang', 'tz', 'motion', 'home', 'openTasks'];
 
 /** Remove every Launch Tracker offline copy before sign-out or an identity change. */
 export function clearOfflineCache() {
@@ -18,6 +20,11 @@ export function clearOfflineCache() {
     storage.removeItem(STORE_KEY);
   } catch {
     /* Storage is unavailable, so no cached copy is reachable by this app. */
+  }
+  try {
+    globalThis.sessionStorage?.removeItem(COMPAT_UI_KEY);
+  } catch {
+    /* Tab storage is unavailable, so the compatibility preferences are unreachable. */
   }
 }
 export const DEFAULT_PREFS = {
@@ -36,6 +43,7 @@ export const DEFAULT_PREFS = {
   title: 'Head of Product',
 };
 const DEV = Boolean(import.meta.env?.DEV);
+let compatibilityUiEnabled = true;
 
 export function emptyData() {
   return {
@@ -74,7 +82,32 @@ export function load() {
   }
   return null;
 }
+
+function loadCompatibilityUi() {
+  if (DEV) return null;
+  try {
+    const parsed = JSON.parse(globalThis.sessionStorage?.getItem(COMPAT_UI_KEY) || 'null');
+    if (!parsed || typeof parsed !== 'object') return null;
+    const storedPrefs = parsed.prefs && typeof parsed.prefs === 'object' ? parsed.prefs : {};
+    const prefs = Object.fromEntries(COMPAT_PREF_KEYS.filter(key => key in storedPrefs).map(key => [key, storedPrefs[key]]));
+    return { prefs, collapsed: parsed.collapsed === true };
+  } catch {
+    return null;
+  }
+}
+
+/** Retire the tab-scoped compatibility preferences before authenticated state loading begins. */
+export function clearCompatibilityUi() {
+  compatibilityUiEnabled = false;
+  try {
+    globalThis.sessionStorage?.removeItem(COMPAT_UI_KEY);
+  } catch {
+    /* Tab storage is unavailable, so no compatibility copy remains reachable. */
+  }
+}
+
 export const saved = load();
+const compatibilityUi = loadCompatibilityUi();
 export const S = {
   // Keep the synthetic workspace in memory only until authenticated sync is installed. The
   // installer clears it synchronously before touching the network, so it cannot reach a protected
@@ -82,7 +115,7 @@ export const S = {
   data: saved?.data || seed(),
   // Restricted endpoint responses live only in memory and are never stored with bootstrap.
   authorized: { launchDirectory: DEV ? syntheticLaunchDirectory() : null },
-  prefs: Object.assign({}, DEFAULT_PREFS, saved?.prefs || {}),
+  prefs: Object.assign({}, DEFAULT_PREFS, compatibilityUi?.prefs || {}, saved?.prefs || {}),
   views: saved?.views || {},
   ui: {
     fx: {},
@@ -93,7 +126,7 @@ export const S = {
     route: 'home',
     params: {},
     history: [],
-    collapsed: !!saved?.collapsed,
+    collapsed: saved?.collapsed ?? compatibilityUi?.collapsed ?? false,
     mnav: false,
     expanded: { p1: true },
     drawer: null,
@@ -149,9 +182,13 @@ export function save() {
   syncHandler?.({ data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed });
   clearTimeout(_saveT);
   _saveT = setTimeout(() => {
-    if (!DEV) return;
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({ data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed }));
+      if (DEV) {
+        localStorage.setItem(STORE_KEY, JSON.stringify({ data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed }));
+      } else if (compatibilityUiEnabled) {
+        const prefs = Object.fromEntries(COMPAT_PREF_KEYS.map(key => [key, S.prefs[key]]));
+        globalThis.sessionStorage?.setItem(COMPAT_UI_KEY, JSON.stringify({ prefs, collapsed: Boolean(S.ui.collapsed) }));
+      }
     } catch {
       /* storage full or blocked: keep working in memory */
     }

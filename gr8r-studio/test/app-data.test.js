@@ -3,7 +3,7 @@ import test from 'node:test';
 
 globalThis.document = { querySelectorAll: () => [] };
 const { installDataSync } = await import('../src/core/app-data.js');
-const { _saveT, emptyData, registerSync, replaceStoreData, S, save, STORE_KEY } = await import('../src/core/store.js');
+const { _saveT, COMPAT_UI_KEY, emptyData, registerSync, replaceStoreData, S, save, STORE_KEY } = await import('../src/core/store.js');
 
 class MemoryStorage {
   #values = new Map();
@@ -53,8 +53,13 @@ const jsonResponse = (data, status = 200) =>
 function assertCompatibilityCleared(renders) {
   assert.equal(S.data.ws.id, '');
   assert.deepEqual(S.data.workspaces, []);
+  assert.equal(S.data.me, '');
+  assert.deepEqual(S.data.members, []);
   assert.deepEqual(S.data.projects, []);
   assert.equal(S.authorized.launchDirectory, null);
+  assert.equal(S.prefs.theme, 'system');
+  assert.equal(S.ui.collapsed, false);
+  assert.equal(globalThis.sessionStorage?.getItem(COMPAT_UI_KEY) ?? null, null);
   assert.equal(renders, 0);
 }
 
@@ -63,6 +68,8 @@ function installCompatibilityData() {
     ...emptyData(),
     ws: { id: 'demo-workspace', name: 'Demo workspace', url: 'demo', c: '#1D1C1A', brand: false },
     workspaces: [{ id: 'demo-workspace', name: 'Demo workspace' }],
+    me: 'demo-user',
+    members: [{ id: 'demo-user', email: 'demo-user@example.test' }],
     projects: [{ id: 'demo-project', name: 'Demo project' }],
   });
   S.authorized.launchDirectory = { contacts: [{ email: 'restricted@example.test' }] };
@@ -73,14 +80,72 @@ test('the production compatibility workspace starts in memory without restricted
   assert.equal(S.authorized.launchDirectory, null);
 });
 
+test('tab compatibility storage allowlists UI preferences and never stores workspace or restricted data', async t => {
+  const previousLocalStorage = globalThis.localStorage;
+  const previousSessionStorage = globalThis.sessionStorage;
+  const localStorage = new MemoryStorage();
+  const sessionStorage = new MemoryStorage();
+  t.after(() => {
+    clearTimeout(_saveT);
+    registerSync(null);
+    if (previousLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousLocalStorage;
+    if (previousSessionStorage === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = previousSessionStorage;
+  });
+  globalThis.localStorage = localStorage;
+  globalThis.sessionStorage = sessionStorage;
+  installCompatibilityData();
+  S.prefs = { ...S.prefs, theme: 'dark', lang: 'English (UK)', name: 'Private Name', title: 'Private Title' };
+  S.ui.collapsed = true;
+
+  save();
+  await new Promise(resolve => setTimeout(resolve, 175));
+
+  assert.equal(localStorage.getItem(STORE_KEY), null);
+  assert.equal(localStorage.length, 0);
+  const raw = sessionStorage.getItem(COMPAT_UI_KEY);
+  assert.ok(raw);
+  const stored = JSON.parse(raw);
+  assert.deepEqual(Object.keys(stored.prefs).sort(), [
+    'accent',
+    'dateFmt',
+    'density',
+    'home',
+    'lang',
+    'motion',
+    'openTasks',
+    'side',
+    'theme',
+    'tz',
+    'weekStart',
+  ]);
+  assert.equal(stored.prefs.theme, 'dark');
+  assert.equal(stored.prefs.lang, 'English (UK)');
+  assert.equal(stored.collapsed, true);
+  assert.ok(!raw.includes('demo-workspace'));
+  assert.ok(!raw.includes('demo-user'));
+  assert.ok(!raw.includes('restricted@example.test'));
+  assert.ok(!raw.includes('Private Name'));
+  assert.ok(!raw.includes('Private Title'));
+});
+
 test('sync installation clears compatibility data before every request and stays empty on failure', async t => {
   const previousFetch = globalThis.fetch;
+  const previousSessionStorage = globalThis.sessionStorage;
   t.after(() => {
     globalThis.fetch = previousFetch;
+    if (previousSessionStorage === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = previousSessionStorage;
   });
   for (const failure of ['401', 'offline', 'bootstrap']) {
     await t.test(failure, async () => {
+      const sessionStorage = new MemoryStorage();
+      sessionStorage.setItem(COMPAT_UI_KEY, JSON.stringify({ prefs: { theme: 'dark' }, collapsed: true }));
+      globalThis.sessionStorage = sessionStorage;
       installCompatibilityData();
+      S.prefs = { ...S.prefs, theme: 'dark' };
+      S.ui.collapsed = true;
       let renders = 0;
       let requests = 0;
       globalThis.fetch = async path => {
@@ -142,23 +207,4 @@ test('the first authenticated bootstrap replaces the cleared compatibility works
   assert.equal(S.data.projects[0].id, 'project-1');
   assert.deepEqual(S.authorized.launchDirectory, directory);
   assert.equal('authorized' in S.data, false);
-});
-
-test('the compatibility workspace and restricted rows are never written to production localStorage', async t => {
-  const previousStorage = globalThis.localStorage;
-  const storage = new MemoryStorage();
-  t.after(() => {
-    clearTimeout(_saveT);
-    registerSync(null);
-    if (previousStorage === undefined) delete globalThis.localStorage;
-    else globalThis.localStorage = previousStorage;
-  });
-  globalThis.localStorage = storage;
-  installCompatibilityData();
-
-  save();
-  await new Promise(resolve => setTimeout(resolve, 175));
-
-  assert.equal(storage.getItem(STORE_KEY), null);
-  assert.equal(storage.length, 0);
 });
