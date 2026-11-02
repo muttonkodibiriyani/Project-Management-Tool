@@ -357,15 +357,16 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
     const workspace = workspaceOf(request);
     const importId = randomUUID();
     const sheets = sheetSummary(workbook);
+    const staged = await storeFile(pool, options.blobs, {
+      workspaceId: workspace.id,
+      uploadedBy: callerOf(request).userId,
+      name: part.filename,
+      data: Readable.from(bytes),
+      area: 'imports',
+      allow: ['xlsx'],
+    });
     const row = await tx(pool, async client => {
-      const stored = await storeFile(client, options.blobs, {
-        workspaceId: workspace.id,
-        uploadedBy: callerOf(request).userId,
-        name: part.filename,
-        data: Readable.from(bytes),
-        area: 'imports',
-        allow: ['xlsx'],
-      });
+      const stored = await staged.attach(client);
       const fileId = String(stored.id);
       const inserted = await client.query<JobRow>('insert into import_job (id,workspace_id,file_id,created_by) values ($1,$2,$3,$4) returning *', [
         importId,
