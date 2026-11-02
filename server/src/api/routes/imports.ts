@@ -1,5 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { Type, type TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import type { MultipartFile } from '@fastify/multipart';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -10,9 +11,10 @@ import { commitPrepared, loadExportData, prepareAgainstDatabase, projectStores, 
 import { CSV_SCOPES, installSchedule, toCsv, vendorPack, type CsvScope } from '../../excel/exports.js';
 import { applyExceptionResolutions, prepareImport, type ExceptionDecision, type PreparedImport } from '../../excel/import.js';
 import { detectLayout, type Layout } from '../../excel/layouts.js';
-import { ImportError, LIMITS, readWorkbook, type Workbook } from '../../excel/xlsx-read.js';
+import { ImportError, readWorkbook, type Workbook } from '../../excel/xlsx-read.js';
 import { fillWorkbook } from '../../excel/xlsx-write.js';
 import { callerOf, workspaceOf } from '../context.js';
+import { discardFile, readFile as readStoredFile, storeFile, UPLOAD_LIMIT } from '../files.js';
 import { ifMatch, toApi, withEtag, type Json, type Row } from '../http.js';
 import type { ApiOptions } from '../plugin.js';
 import { ApiError, invalid, notFound } from '../problem.js';
@@ -87,7 +89,7 @@ const fileTooLarge = () => new ApiError(413, 'payload_too_large', 'The file is o
 
 async function filePart(request: FastifyRequest): Promise<MultipartFile> {
   try {
-    const part = await request.file({ limits: { files: 1, fileSize: LIMITS.fileBytes, fields: 0, parts: 1 } });
+    const part = await request.file({ limits: { files: 1, fileSize: UPLOAD_LIMIT, fields: 0, parts: 1 } });
     if (!part) throw new ApiError(400, 'bad_request', 'Choose one .xlsx file to import.');
     return part;
   } catch (error) {
@@ -104,7 +106,7 @@ async function workbookBytes(part: MultipartFile): Promise<Buffer> {
     for await (const value of part.file as AsyncIterable<Uint8Array>) {
       const chunk = new Uint8Array(value);
       length += chunk.length;
-      if (length > LIMITS.fileBytes) throw fileTooLarge();
+      if (length > UPLOAD_LIMIT) throw fileTooLarge();
       chunks.push(chunk);
     }
   } catch (error) {
@@ -132,11 +134,23 @@ function sheetSummary(workbook: Workbook) {
     });
 }
 
-async function blobBytes(options: ApiOptions, job: JobRow): Promise<Buffer> {
-  if (!options.blobs) throw new ApiError(503, 'unavailable', 'Workbook storage is not configured. Ask an administrator to check Blob storage and try again.');
+function fileRow(job: JobRow): Row {
+  return { id: job.file_id, blob_name: job.blob_name, name: job.file_name };
+}
+
+async function storedWorkbookBytes(options: ApiOptions, job: JobRow): Promise<Buffer> {
   try {
-    return await options.blobs.getBlockBlobClient(job.blob_name).downloadToBuffer();
-  } catch {
+    const chunks: Buffer[] = [];
+    let length = 0;
+    for await (const value of (await readStoredFile(options.blobs, fileRow(job))) as AsyncIterable<Uint8Array | string>) {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      length += chunk.length;
+      if (length > UPLOAD_LIMIT) throw fileTooLarge();
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks, length);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
     throw new ApiError(503, 'unavailable', 'The uploaded workbook could not be read from Blob storage. Try again; if it keeps failing, upload it again.');
   }
 }
@@ -332,7 +346,6 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
   const app = plain.withTypeProvider<TypeBoxTypeProvider>();
 
   app.post('/imports', { config: { access: MANAGERS }, schema: { params: Ws } }, async (request, reply) => {
-    if (!options.blobs) throw new ApiError(503, 'unavailable', 'Workbook storage is not configured. Ask an administrator to check Blob storage and try again.');
     const part = await filePart(request);
     const bytes = await workbookBytes(part);
     let workbook: Workbook;
@@ -342,26 +355,27 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
       asImportProblem(error);
     }
     const workspace = workspaceOf(request);
-    const fileId = randomUUID();
     const importId = randomUUID();
-    const blobName = `imports/${workspace.id}/${fileId}`;
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
     const sheets = sheetSummary(workbook);
+    let stored: Row | undefined;
     try {
-      await options.blobs.getBlockBlobClient(blobName).uploadData(bytes, { blobHTTPHeaders: { blobContentType: XLSX } });
       const row = await tx(pool, async client => {
-        await client.query(
-          `insert into file (id,workspace_id,name,content_type,size_bytes,sha256,blob_container,blob_name,uploaded_by)
-           values ($1,$2,$3,$4,$5,$6,'imports',$7,$8)`,
-          [fileId, workspace.id, part.filename, XLSX, bytes.length, sha256, blobName, callerOf(request).userId],
-        );
+        stored = await storeFile(client, options.blobs, {
+          workspaceId: workspace.id,
+          uploadedBy: callerOf(request).userId,
+          name: part.filename,
+          data: Readable.from(bytes),
+          area: 'imports',
+          allow: ['xlsx'],
+        });
+        const fileId = String(stored.id);
         const inserted = await client.query<JobRow>('insert into import_job (id,workspace_id,file_id,created_by) values ($1,$2,$3,$4) returning *', [
           importId,
           workspace.id,
           fileId,
           callerOf(request).userId,
         ]);
-        return { ...(inserted.rows[0] ?? {}), file_name: part.filename, blob_name: blobName } as JobRow;
+        return { ...(inserted.rows[0] ?? {}), file_name: String(stored.name), blob_name: String(stored.blobName) } as JobRow;
       });
       return await reply
         .code(201)
@@ -369,10 +383,20 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
         .header('etag', `"${String(row.version)}"`)
         .send(publicJob(row, sheets));
     } catch (error) {
-      await options.blobs
-        .getBlockBlobClient(blobName)
-        .deleteIfExists()
-        .catch(() => undefined);
+      let cleanupFailure: unknown;
+      if (stored) {
+        const cleanup = await pool.connect();
+        try {
+          await discardFile(cleanup, options.blobs, stored);
+        } catch (failed) {
+          cleanupFailure = failed;
+        } finally {
+          cleanup.release();
+        }
+      }
+      if (cleanupFailure) {
+        throw new AggregateError([error, cleanupFailure], 'The import transaction and its Blob cleanup both failed.');
+      }
       throw error;
     }
   });
@@ -381,7 +405,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
     const job = await readJob(pool, workspaceOf(request).id, request.params.id);
     let workbook: Workbook;
     try {
-      workbook = readWorkbook(await blobBytes(options, job));
+      workbook = readWorkbook(await storedWorkbookBytes(options, job));
     } catch (error) {
       asImportProblem(error);
     }
@@ -404,7 +428,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
       const current = await readJob(pool, workspace.id, request.params.id);
       let workbook: Workbook;
       try {
-        workbook = readWorkbook(await blobBytes(options, current));
+        workbook = readWorkbook(await storedWorkbookBytes(options, current));
       } catch (error) {
         asImportProblem(error);
       }
@@ -442,7 +466,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
     const job = await readJob(pool, workspace.id, request.params.id);
     if (job.version !== version) throw conflict(job);
     if (!['mapped', 'previewed'].includes(job.status)) throw importState('Pick the sheet, launch and stores before previewing this import.');
-    const bytes = await blobBytes(options, job);
+    const bytes = await storedWorkbookBytes(options, job);
     let workbook: Workbook;
     try {
       workbook = readWorkbook(bytes);
@@ -557,7 +581,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
     if (job.status !== 'previewed') throw importState('Preview this import again before committing it.');
     let workbook: Workbook;
     try {
-      workbook = readWorkbook(await blobBytes(options, job));
+      workbook = readWorkbook(await storedWorkbookBytes(options, job));
     } catch (error) {
       asImportProblem(error);
     }
@@ -595,13 +619,9 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
       if (current.version !== version) throw conflict(current);
       if (current.status === 'committed') throw importState('A committed import cannot be cancelled.');
       const changed = await client.query<JobRow>(`update import_job set status='cancelled',version=version+1 where id=$1 returning *`, [current.id]);
-      await client.query('update file set deleted_at=now() where id=$1 and deleted_at is null', [current.file_id]);
+      await discardFile(client, options.blobs, fileRow(current));
       return { ...(changed.rows[0] ?? {}), file_name: current.file_name, blob_name: current.blob_name } as JobRow;
     });
-    await options.blobs
-      ?.getBlockBlobClient(job.blob_name)
-      .deleteIfExists()
-      .catch(() => undefined);
     return withEtag(reply, publicJob(job));
   });
 

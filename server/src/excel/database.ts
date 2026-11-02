@@ -63,7 +63,7 @@ const INSTALL_COLUMNS: Record<string, string> = {
   Vendor: 'vendor_id',
   'Vendor as written': 'vendor_as_written',
   Brand: 'brand',
-  Zone: 'zone_as_written',
+  'Zone as written': 'zone_as_written',
   'Fixture as written': 'fixture_as_written',
   'Vendor pack': 'vendor_pack',
   'Install start': 'install_start',
@@ -92,7 +92,7 @@ export async function projectStores(db: Db, workspaceId: string, projectId: stri
 /** Existing launch rows in the same flat shape as the pure import engine. */
 export async function loadExisting(db: Db, projectId: string): Promise<{ lines: ExistingLine[]; versions: Record<string, number> }> {
   const { rows: tasks } = await db.query<Row>(
-    `select t.*, b.name as brand, b.host_group, p.launch_code
+    `select t.*, b.name as brand, b.host_group, coalesce(p.launch_code, p.key) as launch_code
        from task t left join brand b on b.id = t.brand_id join project p on p.id = t.project_id
       where t.project_id = $1 and t.kind = 'line' and t.deleted_at is null order by t.key`,
     [projectId],
@@ -160,6 +160,7 @@ export async function loadExisting(db: Db, projectId: string): Promise<{ lines: 
     }
     const install = installs.find(item => item.task_id === task.id);
     if (install) {
+      set(values, 'install.Store', install.store);
       for (const [label, column] of Object.entries(INSTALL_COLUMNS)) set(values, `install.${label}`, column === 'vendor_id' ? install.vendor : install[column]);
       for (const [key, value] of Object.entries(object(install.values))) set(values, `install.${key}`, value);
     }
@@ -291,7 +292,7 @@ async function upsertInstall(client: pg.PoolClient, workspaceId: string, project
     vendorId,
     fields['Vendor as written'],
     fields.Brand,
-    fields.Zone,
+    fields['Zone as written'],
     fields['Fixture as written'],
     fields['Vendor pack'],
     fields['Install start'],
@@ -528,7 +529,7 @@ export async function loadExportData(db: Db, workspaceId: string, projectId: str
     [workspaceId, projectId],
   );
   const installs: TableRow[] = installRows.rows.map(item => {
-    const row: TableRow = { 'Line ID': item.line_id as string, Store: item.store as string };
+    const row: TableRow = { 'Line ID': item.line_id as string, Store: item.store as string, Source: item.source as Value };
     for (const [label, column] of Object.entries(INSTALL_COLUMNS)) row[label] = (column === 'vendor_id' ? item.vendor : item[column]) as Value;
     return { ...row, ...object(item.values) };
   });
