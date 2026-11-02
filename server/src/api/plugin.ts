@@ -63,6 +63,10 @@ function fieldErrors(validation: AjvError[]): FieldError[] {
 
 function toProblem(error: FastifyError & { validation?: AjvError[]; validationContext?: string }): ApiError | undefined {
   if (error instanceof ApiError) return error;
+  if (error.code === 'FST_REQ_FILE_TOO_LARGE')
+    return new ApiError(413, 'payload_too_large', 'The file is over 25 MiB. Remove unused sheets or images, then upload it again.');
+  if (['FST_FILES_LIMIT', 'FST_FIELDS_LIMIT', 'FST_PARTS_LIMIT'].includes(error.code))
+    return new ApiError(400, 'bad_request', 'Send one file and no more than 10 form fields, then try again.');
   if (error.validation) {
     if (error.validationContext === 'body') {
       const errors = fieldErrors(error.validation);

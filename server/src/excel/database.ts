@@ -179,7 +179,8 @@ async function ensureBrand(client: pg.PoolClient, workspaceId: string, name: str
   const { rows } = await client.query<{ id: string }>(
     `insert into brand (workspace_id, name, name_norm, host_group, source) values ($1, $2, $3, $4, $5)
      on conflict (workspace_id, name_norm) do update set name = excluded.name,
-       host_group = coalesce(excluded.host_group, brand.host_group), source = coalesce(excluded.source, brand.source), deleted_at = null
+       host_group = coalesce(excluded.host_group, brand.host_group), source = coalesce(excluded.source, brand.source),
+       deleted_at = null, version = brand.version + 1
      returning id`,
     [workspaceId, name, norm, hostGroup, source],
   );
@@ -191,7 +192,8 @@ async function ensureVendor(client: pg.PoolClient, workspaceId: string, name: st
   const { rows } = await client.query<{ id: string }>(
     `insert into vendor (workspace_id, name, name_norm, aliases) values ($1, $2, $3, array[$2])
      on conflict (workspace_id, name_norm) do update set aliases =
-       (select array_agg(distinct x) from unnest(vendor.aliases || excluded.aliases) x), deleted_at = null returning id`,
+       (select array_agg(distinct x) from unnest(vendor.aliases || excluded.aliases) x), deleted_at = null,
+       version = vendor.version + 1 returning id`,
     [workspaceId, name, norm],
   );
   return String(rows[0]?.id);
@@ -221,7 +223,7 @@ async function upsertLineStore(client: pg.PoolClient, workspaceId: string, taskI
     `insert into line_store (workspace_id, task_id, store_id, values, source, updated_by)
      values ($1, $2, $3, $4, $5, $6)
      on conflict (task_id, store_id) do update set values = excluded.values, source = excluded.source,
-       updated_by = excluded.updated_by, deleted_at = null`,
+       updated_by = excluded.updated_by, deleted_at = null, version = line_store.version + 1`,
     [workspaceId, taskId, storeId, JSON.stringify(merged), source, userId],
   );
 }
@@ -239,7 +241,7 @@ async function upsertDistribution(client: pg.PoolClient, workspaceId: string, br
        distributor_id=excluded.distributor_id, distributor_as_written=excluded.distributor_as_written,
        exclusive=excluded.exclusive, exclusive_months=excluded.exclusive_months,
        registration_route=excluded.registration_route, values=brand_market.values || excluded.values,
-       notes=excluded.notes, source=excluded.source, deleted_at=null returning id`,
+       notes=excluded.notes, source=excluded.source, deleted_at=null, version=brand_market.version+1 returning id`,
     [
       workspaceId,
       brandId,
@@ -260,14 +262,15 @@ async function upsertDistribution(client: pg.PoolClient, workspaceId: string, br
     await client.query(
       `insert into brand_market_margin (brand_market_id, workspace_id, margin, extra_margin, terms, as_written) values ($1,$2,$3,$4,$5,$6)
        on conflict (brand_market_id) do update set margin=excluded.margin, extra_margin=excluded.extra_margin,
-         terms=excluded.terms, as_written=excluded.as_written`,
+         terms=excluded.terms, as_written=excluded.as_written, version=brand_market_margin.version+1`,
       [marketId, workspaceId, fields.Margin, fields['Extra margin'], fields['Margin terms'], fields['Margin as written']],
     );
   }
   if ('Contacts as written' in fields) {
     await client.query(
       `insert into brand_market_contacts (brand_market_id, workspace_id, contacts_as_written) values ($1,$2,$3)
-       on conflict (brand_market_id) do update set contacts_as_written=excluded.contacts_as_written`,
+       on conflict (brand_market_id) do update set contacts_as_written=excluded.contacts_as_written,
+         version=brand_market_contacts.version+1`,
       [marketId, workspaceId, fields['Contacts as written']],
     );
   }
@@ -318,7 +321,7 @@ async function upsertInstall(client: pg.PoolClient, workspaceId: string, project
       `update install set host_group=$5,vendor_id=$6,vendor_as_written=$7,brand=$8,zone_as_written=$9,
         fixture_as_written=$10,vendor_pack=$11,install_start=$12,install_end=$13,install_status=$14,contractor=$15,
         delivery_date=$16,delivery_status=$17,vm_status=$18,wall_perimeter=$19,email_sent=$20,email_sent_by=$21,
-        values=$22,notes=$23,source=$24 where id=$25`,
+        values=$22,notes=$23,source=$24,version=version+1 where id=$25`,
       [...params, row.id],
     );
   }
@@ -330,17 +333,28 @@ export interface CommitResult {
 }
 
 /** One short transaction: task, store, distribution, install, activity and job status succeed together. */
-export async function commitPrepared(pool: pg.Pool, request: FastifyRequest, importId: string, draft: PreparedDraft): Promise<CommitResult> {
+export async function commitPrepared(
+  pool: pg.Pool,
+  request: FastifyRequest,
+  importId: string,
+  expectedVersion: number,
+  draft: PreparedDraft,
+): Promise<CommitResult> {
   const workspace = workspaceOf(request);
   const userId = callerOf(request).userId;
   return tx(pool, async client => {
-    const job = await client.query<{ project_id: string; status: string; summary: CommitResult | null }>(
-      'select project_id, status, summary from import_job where id=$1 and workspace_id=$2 for update',
+    const job = await client.query<{ project_id: string; status: string; summary: CommitResult | null; version: number }>(
+      'select project_id, status, summary, version from import_job where id=$1 and workspace_id=$2 for update',
       [importId, workspace.id],
     );
     const currentJob = job.rows[0];
     if (!currentJob) throw new Error('Import draft disappeared before commit.');
     if (currentJob.status === 'committed' && currentJob.summary) return currentJob.summary;
+    if (currentJob.version !== expectedVersion) {
+      const error = new Error('The import choices changed after commit started.');
+      error.name = 'ImportConflictError';
+      throw error;
+    }
     if (currentJob.status !== 'previewed') throw new Error(`Import is ${currentJob.status}, not previewed.`);
     const projectResult = await client.query<ProjectRow>('select id,key,launch_code,next_task_no from project where id=$1 and workspace_id=$2 for update', [
       currentJob.project_id,
@@ -373,6 +387,13 @@ export async function commitPrepared(pool: pg.Pool, request: FastifyRequest, imp
 
     for (const line of draft.prepared.lines) {
       const matched = (line.lineId ? byKey.get(line.lineId) : undefined) ?? byExternal.get(line.key);
+      const planned = draft.plan.changes.find(change => change.rowNo === line.rowNo);
+      if (matched && planned?.action === 'unchanged') {
+        const taskId = String(matched.id);
+        rowTasks.set(line.rowNo, taskId);
+        importedRows.push({ line, taskId, key: String(matched.key), brandId: String(matched.brand_id) });
+        continue;
+      }
       const brandName = String(line.fields.Brand ?? '').trim();
       const brandId = await ensureBrand(client, workspace.id, brandName, line.fields['Host group'] ?? null, line.fields.Source ?? null);
       let key = matched ? String(matched.key) : '';
@@ -390,7 +411,7 @@ export async function commitPrepared(pool: pg.Pool, request: FastifyRequest, imp
       let version: number;
       if (matched) {
         const updated = await client.query<{ id: string; version: number }>(
-          `update task set title=$2,brand_id=$3,external_key=$4,values=$5,notes=$6,source=$7,updated_by=$8
+          `update task set title=$2,brand_id=$3,external_key=$4,values=$5,notes=$6,source=$7,updated_by=$8,version=version+1
             where id=$1 returning id,version`,
           [matched.id, brandName, brandId, line.fields['External key'], JSON.stringify(values), line.fields.Notes, line.fields.Source, userId],
         );
@@ -438,7 +459,6 @@ export async function commitPrepared(pool: pg.Pool, request: FastifyRequest, imp
         const store = typeof line.install.Store === 'string' ? storeByCode.get(matchKey(line.install.Store)) : undefined;
         if (store) await upsertInstall(client, workspace.id, project.id, taskId, store.id, line.install, line.install.Source ?? null);
       }
-      const planned = draft.plan.changes.find(change => change.rowNo === line.rowNo);
       if (planned?.action !== 'unchanged') {
         changedKeys.push(key);
         await record(client, request, {
@@ -455,11 +475,14 @@ export async function commitPrepared(pool: pg.Pool, request: FastifyRequest, imp
     }
     for (const { line, taskId } of importedRows) {
       const primaryId = line.doubleOfRow === null ? null : (rowTasks.get(line.doubleOfRow) ?? null);
-      await client.query('update task set double_of_id=$2 where id=$1 and double_of_id is distinct from $2::uuid', [taskId, primaryId]);
+      await client.query('update task set double_of_id=$2,version=version+1 where id=$1 and double_of_id is distinct from $2::uuid', [taskId, primaryId]);
     }
-    await client.query('update project set next_task_no=$2 where id=$1', [project.id, next]);
+    if (next !== project.next_task_no) await client.query('update project set next_task_no=$2,version=version+1 where id=$1', [project.id, next]);
     const result = { summary: draft.plan.summary, changedKeys };
-    await client.query(`update import_job set status='committed', committed_at=now(), summary=$2 where id=$1`, [importId, JSON.stringify(result)]);
+    await client.query(`update import_job set status='committed', committed_at=now(), summary=$2,version=version+1 where id=$1`, [
+      importId,
+      JSON.stringify(result),
+    ]);
     return result;
   });
 }

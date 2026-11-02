@@ -4,9 +4,9 @@ import { strToU8, zipSync } from 'fflate';
 import { buildXlsx } from '../testing/xlsx.js';
 import { LIMITS, ImportError, cell, readWorkbook, serialToDate, type ImportErrorCode } from './xlsx-read.js';
 
-function refused(bytes: Uint8Array, code: ImportErrorCode): void {
+function refused(bytes: Uint8Array, code: ImportErrorCode, limits = LIMITS): void {
   assert.throws(
-    () => readWorkbook(bytes),
+    () => readWorkbook(bytes, limits),
     (err: unknown) => {
       assert.ok(err instanceof ImportError, `expected ImportError, got ${String(err)}`);
       assert.equal(err.code, code);
@@ -49,6 +49,10 @@ test('a file that is not a zip, or a zip that is not a workbook, is refused', ()
   refused(zipSync({ 'readme.txt': strToU8('hello') }), 'not_xlsx');
 });
 
+test('a workbook without [Content_Types].xml is refused', () => {
+  refused(zipSync({ 'xl/workbook.xml': strToU8('<workbook/>'), 'xl/_rels/workbook.xml.rels': strToU8('<Relationships/>') }), 'not_xlsx');
+});
+
 test('a password-protected workbook (encrypted OLE file) is refused with its own message', () => {
   const ole = new Uint8Array(512);
   ole.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
@@ -58,6 +62,12 @@ test('a password-protected workbook (encrypted OLE file) is refused with its own
 test('a zip bomb stops at the ratio limit without inflating the whole part', () => {
   const zeros = new Uint8Array(8 * 1024 * 1024);
   refused(buildXlsx(plain, { parts: { 'xl/worksheets/sheet1.xml': zeros } }), 'zip_bomb');
+});
+
+test('too many zip entries and too many total uncompressed bytes are refused', () => {
+  const ordinary = buildXlsx(plain);
+  refused(ordinary, 'zip_bomb', { ...LIMITS, entries: 2 });
+  refused(ordinary, 'zip_bomb', { ...LIMITS, totalBytes: 100 });
 });
 
 test('XML with a DOCTYPE (where external entities are declared) is refused', () => {

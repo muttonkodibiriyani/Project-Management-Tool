@@ -82,17 +82,23 @@ const MACRO_PART = /(^|\/)vbaProject\.bin$|^xl\/macrosheets\//i;
 /** Compressed bytes fed to the inflater at a time: deflate expands at most about 1,032 times, so no inflated chunk passes ~4 MiB. */
 const PUSH_BYTES = 4096;
 
-function unzipParts(bytes: Uint8Array): Map<string, Uint8Array> {
+function unzipParts(bytes: Uint8Array, limits: typeof LIMITS): Map<string, Uint8Array> {
   const parts = new Map<string, Uint8Array>();
   let entries = 0;
   let total = 0;
+  let declaredTotal = 0;
   // fflate catches what a callback throws, so a failure is kept here and raised after each push.
   let failure: ImportError | undefined;
   const unzip = new Unzip();
   unzip.register(UnzipInflate);
   unzip.onfile = (file: UnzipFile) => {
     entries += 1;
-    if (entries > LIMITS.entries) failure ??= new ImportError('zip_bomb', `more than ${String(LIMITS.entries)} parts`);
+    if (entries > limits.entries) failure ??= new ImportError('zip_bomb', `more than ${String(limits.entries)} parts`);
+    if (file.originalSize !== undefined) {
+      declaredTotal += file.originalSize;
+      if (declaredTotal > limits.totalBytes) failure ??= new ImportError('zip_bomb', `more than ${String(limits.totalBytes)} uncompressed bytes`);
+      if (file.size && file.originalSize > 1024 * 1024 && file.originalSize > file.size * limits.ratio) failure ??= new ImportError('zip_bomb');
+    }
     if (MACRO_PART.test(file.name)) failure ??= new ImportError('macros');
     if (failure || !WANTED.test(file.name)) return;
     const chunks: Uint8Array[] = [];
@@ -106,7 +112,7 @@ function unzipParts(bytes: Uint8Array): Map<string, Uint8Array> {
       inflated += chunk.length;
       total += chunk.length;
       // Parts streamed with a data descriptor carry no compressed size; the absolute limits still hold.
-      const bomb = inflated > LIMITS.partBytes || total > LIMITS.totalBytes || (file.size && inflated > 1024 * 1024 && inflated > file.size * LIMITS.ratio);
+      const bomb = inflated > limits.partBytes || total > limits.totalBytes || (file.size && inflated > 1024 * 1024 && inflated > file.size * limits.ratio);
       if (bomb) {
         failure = new ImportError('zip_bomb');
         file.terminate();
@@ -350,12 +356,12 @@ export interface Workbook {
   sheets: Sheet[];
 }
 
-export function readWorkbook(bytes: Uint8Array): Workbook {
-  if (bytes.length > LIMITS.fileBytes) throw new ImportError('too_large');
+export function readWorkbook(bytes: Uint8Array, limits: typeof LIMITS = LIMITS): Workbook {
+  if (bytes.length > limits.fileBytes) throw new ImportError('too_large');
   if (startsWith(bytes, OLE_MAGIC)) throw new ImportError('password_protected');
   if (!startsWith(bytes, ZIP_MAGIC)) throw new ImportError('not_xlsx');
 
-  const parts = unzipParts(bytes);
+  const parts = unzipParts(bytes, limits);
   const contentTypes = parts.get('[Content_Types].xml');
   const workbookXml = parts.get('xl/workbook.xml');
   const relsXml = parts.get('xl/_rels/workbook.xml.rels');

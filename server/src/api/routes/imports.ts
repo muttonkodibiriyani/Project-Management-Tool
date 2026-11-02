@@ -84,13 +84,15 @@ function asImportProblem(error: unknown): never {
   throw error;
 }
 
+const fileTooLarge = () => new ApiError(413, 'payload_too_large', 'The file is over 25 MiB. Remove unused sheets or images, then upload it again.');
+
 async function filePart(request: FastifyRequest): Promise<MultipartFile> {
   try {
     const part = await request.file({ limits: { files: 1, fileSize: LIMITS.fileBytes, fields: 0, parts: 1 } });
     if (!part) throw new ApiError(400, 'bad_request', 'Choose one .xlsx file to import.');
     return part;
   } catch (error) {
-    if ((error as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') throw new ApiError(413, 'too_large', new ImportError('too_large').message);
+    if ((error as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') throw fileTooLarge();
     throw error;
   }
 }
@@ -100,17 +102,17 @@ async function workbookBytes(part: MultipartFile): Promise<Buffer> {
   const chunks: Uint8Array[] = [];
   let length = 0;
   try {
-    for await (const value of part.file) {
-      const chunk = Buffer.isBuffer(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : new Uint8Array(value);
+    for await (const value of part.file as AsyncIterable<Uint8Array>) {
+      const chunk = new Uint8Array(value);
       length += chunk.length;
-      if (length > LIMITS.fileBytes) throw new ApiError(413, 'too_large', new ImportError('too_large').message);
+      if (length > LIMITS.fileBytes) throw fileTooLarge();
       chunks.push(chunk);
     }
   } catch (error) {
-    if ((error as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') throw new ApiError(413, 'too_large', new ImportError('too_large').message);
+    if ((error as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') throw fileTooLarge();
     throw error;
   }
-  if (part.file.truncated) throw new ApiError(413, 'too_large', new ImportError('too_large').message);
+  if (part.file.truncated) throw fileTooLarge();
   const bytes = Buffer.concat(chunks, length);
   if (bytes.length < 4 || !bytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) {
     throw new ApiError(422, 'not_xlsx', 'This file is not an .xlsx workbook. Export it as Excel Workbook (.xlsx), then upload that copy.');
@@ -264,7 +266,7 @@ async function savePreview(client: pg.PoolClient, job: JobRow, draft: PreparedDr
       resolution.get(key) ? JSON.stringify(resolution.get(key)) : null,
     ]);
   }
-  const result = await client.query<JobRow>(`update import_job set status='previewed', summary=$2 where id=$1 returning *`, [
+  const result = await client.query<JobRow>(`update import_job set status='previewed', summary=$2, version=version+1 where id=$1 returning *`, [
     job.id,
     JSON.stringify({ ...summaryOf(draft), previewVersions: draft.versions }),
   ]);
@@ -390,7 +392,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
         if (locked.version !== version) throw conflict(locked);
         if (['committed', 'cancelled'].includes(locked.status)) throw importState(`This import is already ${locked.status}. Start a new import to change it.`);
         const changed = await client.query<JobRow>(
-          `update import_job set sheet=$2,layout=$3,project_id=$4,store_map=$5,mapping=$6,status='mapped',summary=null where id=$1 returning *`,
+          `update import_job set sheet=$2,layout=$3,project_id=$4,store_map=$5,mapping=$6,status='mapped',summary=null,version=version+1 where id=$1 returning *`,
           [
             locked.id,
             request.body.sheet,
@@ -469,7 +471,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
         [job.id, request.params.normalisationId, request.body.storedAs],
       );
       if (!result.rows[0]) throw notFound('This normalisation');
-      await pool.query(`update import_job set status='mapped',summary=null where id=$1`, [job.id]);
+      await pool.query(`update import_job set status='mapped',summary=null,version=version+1 where id=$1`, [job.id]);
       return toApi(result.rows[0]);
     },
   );
@@ -511,7 +513,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
         JSON.stringify(request.body.resolution),
       ]);
       if (!result.rows[0]) throw notFound('This exception');
-      await pool.query(`update import_job set status='mapped',summary=null where id=$1`, [job.id]);
+      await pool.query(`update import_job set status='mapped',summary=null,version=version+1 where id=$1`, [job.id]);
       return toApi(result.rows[0]);
     },
   );
@@ -541,12 +543,12 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
       );
     }
     try {
-      await commitPrepared(pool, request, job.id, draft);
+      await commitPrepared(pool, request, job.id, version, draft);
     } catch (error) {
       if ((error as Error).name === 'ImportConflictError') {
         throw new ApiError(409, 'version_conflict', `${(error as Error).message} Preview again so the newer values are not overwritten.`);
       }
-      await pool.query(`update import_job set status='failed',summary=$2 where id=$1 and status <> 'committed'`, [
+      await pool.query(`update import_job set status='failed',summary=$2,version=version+1 where id=$1 and status <> 'committed'`, [
         job.id,
         JSON.stringify({ error: 'The import did not finish. Nothing was changed; preview it and commit again.' }),
       ]);
@@ -562,7 +564,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
       const current = await readJob(client, workspace.id, request.params.id, true);
       if (current.version !== version) throw conflict(current);
       if (current.status === 'committed') throw importState('A committed import cannot be cancelled.');
-      const changed = await client.query<JobRow>(`update import_job set status='cancelled' where id=$1 returning *`, [current.id]);
+      const changed = await client.query<JobRow>(`update import_job set status='cancelled',version=version+1 where id=$1 returning *`, [current.id]);
       await client.query('update file set deleted_at=now() where id=$1 and deleted_at is null', [current.file_id]);
       return { ...(changed.rows[0] ?? {}), file_name: current.file_name, blob_name: current.blob_name } as JobRow;
     });
