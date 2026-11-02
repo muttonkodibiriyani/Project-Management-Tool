@@ -1,7 +1,7 @@
 /* ---------- toasts ---------- */
 import { $, esc } from '../core/utils.js';
 import { ic } from '../core/icons.js';
-import { S, save } from '../core/store.js';
+import { S, save, syncInstalled } from '../core/store.js';
 import { render } from '../shell/render.js';
 
 export function toast(msg, opt = {}) {
@@ -25,11 +25,14 @@ export function toast(msg, opt = {}) {
   host.appendChild(el);
   setTimeout(kill, opt.ms || 4200);
 }
-/* guarded mutation: simulates offline failures for the "Failed to save" state */
+/* Queue offline mutations only when authenticated sync has installed its durable outbox. */
 export function mutate(fn, label) {
   if (S.ui.offline) {
-    toast("Your changes couldn't be saved. You're offline.", { kind: 'err', action: 'Try again', onAction: () => mutate(fn, label) });
-    return false;
+    if (!syncInstalled()) {
+      toast("Your changes couldn't be saved. You're offline.", { kind: 'err', action: 'Try again', onAction: () => mutate(fn, label) });
+      return false;
+    }
+    toast(`${label || 'Your change'} is saved offline and will sync when the connection returns.`, { kind: 'info' });
   }
   fn();
   save();

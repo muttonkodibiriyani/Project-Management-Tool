@@ -65,6 +65,9 @@ export function persistFollowUp({ data, line, gate, owner, ownerName, due, note,
   const comment = {
     ...made.comment,
     id: ids.comment,
+    // The server's atomic follow-up endpoint writes this comment and the notification.
+    // The marker keeps the offline diff from sending a second standalone comment.
+    followUpTaskId: ids.task,
     taskId: line.id,
     authorId: by,
     body: made.comment.text,

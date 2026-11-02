@@ -20,13 +20,13 @@ interface Stored {
 }
 
 /**
- * Reloads once the app has written `expected` to storage. gr8r-studio saves on a 150 ms debounce
- * and does not flush on unload, so a reload inside that window would lose the change.
+ * Reloads once the pre-auth app has written `expected` to its tab-scoped, allowlisted UI record.
+ * Authenticated API sync retires this compatibility record before its first request.
  */
 async function reload(page: Page, expected: Stored): Promise<void> {
   await expect
     .poll(async () => {
-      const raw = await page.evaluate(() => localStorage.getItem('gr8r.v2'));
+      const raw = await page.evaluate(() => sessionStorage.getItem('lt.compat.ui.v1'));
       const stored = (raw ? JSON.parse(raw) : {}) as Stored;
       return {
         ...(expected.prefs && { prefs: Object.fromEntries(Object.keys(expected.prefs).map(k => [k, stored.prefs?.[k]])) }),
