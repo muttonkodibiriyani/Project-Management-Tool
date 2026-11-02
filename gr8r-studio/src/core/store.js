@@ -5,6 +5,21 @@ import { seed } from '../data/seed.js';
 import { syntheticLaunchDirectory } from '../data/launch-seed.js';
 
 export const STORE_KEY = 'gr8r.v2';
+export const CACHE_POINTER_KEY = 'lt.cache.active';
+export const CACHE_PREFIX = 'lt.cache.v1:';
+
+/** Remove every Launch Tracker offline copy before sign-out or an identity change. */
+export function clearOfflineCache() {
+  try {
+    const storage = globalThis.localStorage;
+    const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index)).filter(key => key?.startsWith(CACHE_PREFIX));
+    for (const key of keys) storage.removeItem(key);
+    storage.removeItem(CACHE_POINTER_KEY);
+    storage.removeItem(STORE_KEY);
+  } catch {
+    /* Storage is unavailable, so no cached copy is reachable by this app. */
+  }
+}
 export const DEFAULT_PREFS = {
   theme: 'system',
   accent: 'indigo',
