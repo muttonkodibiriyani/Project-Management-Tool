@@ -1,5 +1,6 @@
 /* ---------- seed data ---------- */
 import { dOff, minsAgo, uid } from '../core/utils.js';
+import { addSyntheticLaunch } from './launch-seed.js';
 
 export function seed() {
   const members = [
@@ -100,6 +101,8 @@ export function seed() {
       tz: 'Madrid',
     },
   ];
+  const launchTeams = [['brand', 'commercial'], ['comms'], ['supply'], ['vm'], ['marketing'], ['registration'], ['brand'], []];
+  members.forEach((member, index) => (member.teams = launchTeams[index]));
   const projects = [
     {
       id: 'p1',
@@ -497,6 +500,7 @@ export function seed() {
   ];
   const tmp = tk('t3');
   tmp.updated = minsAgo(38);
+  const launchData = addSyntheticLaunch({ projects, tasks: T, dOff, minsAgo });
   return {
     ws: { name: 'Gr8r Studio', url: 'gr8rstudio', c: '#1D1C1A', brand: true },
     workspaces: [
@@ -513,6 +517,7 @@ export function seed() {
     notifs,
     files,
     events,
+    ...launchData,
     projOrder: projects.map(p => p.id),
     savedViews: [{ id: 'v1', project: 'p1', name: 'High priority', type: 'list', filters: [{ f: 'priority', op: 'is', v: ['urgent', 'high'] }] }],
     recentSearches: ['homepage', 'Sarah', 'wireframes'],

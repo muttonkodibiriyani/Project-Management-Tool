@@ -47,6 +47,20 @@
   --st-progress: #c88a14;
   --st-review: #7652c2;
   --st-done: #2e8456;
+  /* launch components use semantic aliases, so every theme and accent works */
+  --bc-purple: var(--violet);
+  --bc-blue: var(--blue);
+  --bc-green: var(--green);
+  --bc-yellow: var(--amber);
+  --bc-grey: var(--gray);
+  --bc-tbc: var(--orange);
+  --bc-other: var(--rose);
+  --bc-late: var(--red);
+  --gv-done: var(--green);
+  --gv-wait: var(--amber);
+  --gv-late: var(--red);
+  --gv-info: var(--blue);
+  --gv-none: var(--gray);
   /* elevation */
   --shadow-sm: 0 1px 2px rgba(28, 25, 20, 0.05);
   --shadow-card: 0 1px 2px rgba(28, 25, 20, 0.04), 0 0 0 1px var(--border);

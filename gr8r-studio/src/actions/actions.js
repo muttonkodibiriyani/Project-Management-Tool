@@ -13,6 +13,8 @@ import { viewOf } from '../shell/view-engine.js';
 import { TEMPLATES, closeModal, openModal } from '../overlays/modals.js';
 import { closePop, openPop, tgt } from '../overlays/popovers.js';
 import { strengthMeter } from '../pages/settings.js';
+import { persistFollowUp } from '../launch/followups.js';
+import { followUpDefaults } from '../pages/launch.js';
 
 export const A = {},
   IN = {},
@@ -168,7 +170,7 @@ A.go = el => {
   const p = {};
   if (el.dataset.id) p.id = el.dataset.id;
   if (el.dataset.tab) p.tab = el.dataset.tab;
-  else if (r === 'project') p.tab = S.prefs.defaultTab || 'board';
+  else if (r === 'project') p.tab = proj(p.id)?.kind === 'launch' ? 'table' : S.prefs.defaultTab || 'board';
   if (el.dataset.sec) p.sec = el.dataset.sec;
   S.ui.palette = null;
   const tabOnly = r === 'project' && S.ui.route === 'project' && S.ui.params.id === p.id;
@@ -180,7 +182,10 @@ A.back = () => {
   else go('home');
 };
 A.reload = () => render();
-A.openProject = el => go('project', { id: el.dataset.id, tab: S.prefs.defaultTab || 'board' });
+A.openProject = el => {
+  const p = proj(el.dataset.id);
+  go('project', { id: el.dataset.id, tab: p?.kind === 'launch' ? 'table' : S.prefs.defaultTab || 'board' });
+};
 A.set = el => {
   const k = el.dataset.k;
   let v = el.dataset.v;
@@ -229,6 +234,41 @@ A.goFilteredList = el => {
   v.filters = [{ f: 'status', op: 'is', v: [el.dataset.st] }];
   v.group = 'status';
   go('project', { id: el.dataset.id, tab: 'list' }, { tab: true });
+};
+
+A.raiseLaunchFollowUp = el => {
+  const p = proj(S.ui.params.id);
+  if (!p || p.kind !== 'launch') return;
+  const { line, gate, owner, ownerName, store } = followUpDefaults(p, el.dataset.line, el.dataset.gate, el.dataset.store);
+  if (!line || !gate || !owner) {
+    toast("This follow-up couldn't be raised. Open the line and pick an owner.", { kind: 'err' });
+    return;
+  }
+  const due = iso(addD(TODAY, 3));
+  if (
+    mutate(() => {
+      persistFollowUp({
+        data: D(),
+        line,
+        gate,
+        owner,
+        ownerName,
+        due,
+        note: store ? `${gate.name} for ${store.code}` : gate.name,
+        by: D().me,
+        now: Date.now(),
+        today: iso(TODAY),
+        ids: { task: uid('t'), comment: uid('c'), notification: uid('n') },
+        key: nextKey(p),
+        storeId: store?.id || null,
+        order: Math.max(0, ...D().tasks.map(item => item.order || 0)) + 1,
+      });
+      save();
+    })
+  ) {
+    render();
+    toast(`Follow-up sent to ${ownerName} · due ${fmtDate(due)}`);
+  }
 };
 
 /* ---------- theme ---------- */
