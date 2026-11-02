@@ -15,7 +15,7 @@
 
 export const LISTING = 'listing';
 /* Brand codes whose store gates are closed: Grey is dropped vs UAE (spec section 4). */
-export const CLOSED_CODES = ['Grey'];
+export const CLOSED_CODES = ['Grey', 'grey'];
 export const AT_RISK_DAYS = 7;
 export const PENETRATION = ['penetrationPlan', 'penetrationUaeActual', 'penetrationUaeAll', 'penetrationPlanMoe'];
 

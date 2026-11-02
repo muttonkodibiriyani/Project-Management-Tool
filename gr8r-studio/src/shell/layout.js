@@ -24,6 +24,7 @@ import { pageWsTimeline } from '../views/timeline.js';
 import { pageSettings } from '../pages/settings.js';
 import { pageStates, pageSystem } from '../pages/design-system.js';
 import { pageArchive } from '../features/archive.js';
+import { pageBrands, pageStores } from '../pages/launch.js';
 
 export function renderShell() {
   const u = S.ui;
@@ -63,6 +64,8 @@ export function renderPage() {
       system: pageSystem,
       states: pageStates,
       archive: pageArchive,
+      stores: pageStores,
+      brands: pageBrands,
     };
     return (P[r] || page404)();
   } catch (e) {
@@ -108,6 +111,8 @@ export function renderSidebar() {
         ${sItem('tasks', 'Tasks', 'list-checks')}
         ${sItem('calendar', 'Calendar', 'calendar')}
         ${sItem('timeline', 'Timeline', 'chart-gantt')}
+        ${sItem('stores', 'Stores & fixtures', 'store')}
+        ${sItem('brands', 'Brands & vendors', 'contact')}
         ${sItem('members', 'Members', 'users')}
         ${sItem('activity', 'Activity', 'activity')}
       </div>

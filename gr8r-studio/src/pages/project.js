@@ -15,6 +15,7 @@ import { tableHtml } from '../views/table.js';
 import { calendarHtml } from '../views/calendar.js';
 import { timelineHtml, tlControls } from '../views/timeline.js';
 import { filesHtml } from '../views/files.js';
+import { launchFollowUpsHtml } from './launch.js';
 
 export const PTABS = [
   ['overview', 'Overview', 'layout-dashboard'],
@@ -31,7 +32,8 @@ export function pageProject() {
   const p = proj(S.ui.params.id);
   if (!p) return page404();
   if (!canSee(p)) return stateDenied(p);
-  const tab = S.ui.params.tab || 'board';
+  const tab = S.ui.params.tab || (p.kind === 'launch' ? 'table' : 'board');
+  const tabs = p.kind === 'launch' ? [...PTABS, ['followups', 'Follow-ups', 'bell-ring']] : PTABS;
   const views = D().savedViews.filter(v => v.project === p.id);
   let body = '';
   const key = 'p:' + p.id;
@@ -50,6 +52,7 @@ export function pageProject() {
   } else if (tab === 'overview') body = projOverview(p);
   else if (tab === 'files') body = filesHtml(p.id);
   else if (tab === 'activity') body = projActivity(p);
+  else if (tab === 'followups' && p.kind === 'launch') body = launchFollowUpsHtml(p);
   else body = taskViewBody(tab, applyView(ts, viewOf(key)), key, p);
 
   return `<div class="page flush">
@@ -69,7 +72,7 @@ export function pageProject() {
         </div>
       </div>
       <nav class="tabs" aria-label="Project views">
-        ${PTABS.map(([k, n, i]) => `<button ${tab === k ? 'aria-current="page"' : ''} class="tab ${tab === k ? 'on' : ''}" data-a="go" data-r="project" data-id="${p.id}" data-tab="${k}">${ic(i, 14)}${n}</button>`).join('')}
+        ${tabs.map(([k, n, i]) => `<button ${tab === k ? 'aria-current="page"' : ''} class="tab ${tab === k ? 'on' : ''}" data-a="go" data-r="project" data-id="${p.id}" data-tab="${k}">${ic(i, 14)}${n}</button>`).join('')}
         ${views.map(v => `<button ${tab === 'v:' + v.id ? 'aria-current="page"' : ''} class="tab ${tab === 'v:' + v.id ? 'on' : ''}" data-a="go" data-r="project" data-id="${p.id}" data-tab="v:${v.id}" data-ctx="savedview" data-vid="${v.id}">${ic('list-filter', 14)}${esc(v.name)}</button>`).join('')}
         <button class="tab" data-a="saveView" data-id="${p.id}" data-tip="Save current filters as a view" aria-label="Save view">${ic('plus', 14)}</button>
       </nav>

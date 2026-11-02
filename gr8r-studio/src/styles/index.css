@@ -14,5 +14,6 @@
 @import './states.css';
 @import './pages/settings.css';
 @import './pages/auth.css';
+@import './pages/launch.css';
 @import './motion.css';
 @import './responsive.css';

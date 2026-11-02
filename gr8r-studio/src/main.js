@@ -30,6 +30,7 @@ import './pages/activity.js';
 import './pages/search.js';
 import './pages/errors.js';
 import './pages/project.js';
+import './pages/launch.js';
 import './views/project-overview.js';
 import './views/board.js';
 import './views/table.js';

@@ -33,6 +33,8 @@ export const ROUTE_NAMES = {
   system: 'Design system',
   states: 'System states',
   archive: 'Archive',
+  stores: 'Stores & fixtures',
+  brands: 'Brands & vendors',
 };
 export const ROUTE_ICONS = {
   home: 'house',
@@ -53,10 +55,12 @@ export const ROUTE_ICONS = {
   system: 'component',
   states: 'layers',
   archive: 'archive',
+  stores: 'store',
+  brands: 'contact',
 };
 
 export function go(route, params = {}, opt = {}) {
-  if (route === 'project' && !params.tab) params.tab = 'board';
+  if (route === 'project' && !params.tab) params.tab = proj(params.id)?.kind === 'launch' ? 'table' : 'board';
   if (!opt.back) S.ui.history.push({ route: S.ui.route, params: S.ui.params });
   const same = S.ui.route === route && JSON.stringify(S.ui.params) === JSON.stringify(params);
   S.ui.route = route;
@@ -109,7 +113,10 @@ export function pageTitle() {
   const u = S.ui;
   if (u.auth) return 'Gr8r Studio';
   let t = ROUTE_NAMES[u.route] || 'Not found';
-  if (u.route === 'project' && proj(u.params.id)) t = `${(PTABS.find(x => x[0] === u.params.tab) || [0, 'Saved view'])[1]} · ${proj(u.params.id).name}`;
+  if (u.route === 'project' && proj(u.params.id)) {
+    const tab = u.params.tab === 'followups' ? 'Follow-ups' : (PTABS.find(x => x[0] === u.params.tab) || [0, 'Saved view'])[1];
+    t = `${tab} · ${proj(u.params.id).name}`;
+  }
   if (u.route === 'member' && mem(u.params.id)) t = mem(u.params.id).name;
   if (u.route === 'team' && team(u.params.id)) t = team(u.params.id).name;
   return `${t} · ${D().ws.name}`;

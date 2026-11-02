@@ -6,8 +6,10 @@ import { D, TM, isOver, mem, pColor, progressOf, task, tasksOf } from '../core/s
 import { av, avStack, empty, pStatus, stIcon } from '../ui/helpers.js';
 import { sortTasks } from '../shell/view-engine.js';
 import { actHtml, miniRow } from '../components/task-list.js';
+import { launchOverviewHtml } from '../pages/launch.js';
 
 export function projOverview(p) {
+  if (p.kind === 'launch') return launchOverviewHtml(p);
   const ts = tasksOf(p.id);
   const pr = progressOf(p.id);
   const cnt = STATUSES.map(s => ({ s, n: ts.filter(t => t.status === s.id).length }));
