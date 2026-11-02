@@ -133,7 +133,7 @@ if ! "$engine" run --rm --name "$NAME-playwright" --network "$NAME" --init --shm
   --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI="${CI:-}" -e NPM_CONFIG_UPDATE_NOTIFIER=false \
   -e APP_HOST="$NAME-app" -e BASE_URL=http://127.0.0.1:8080 \
   -v "$E2E_DIR:/e2e" --tmpfs /e2e/node_modules:exec,mode=1777 -w /e2e \
-  "$PLAYWRIGHT_IMAGE" sh -c 'npm ci --ignore-scripts --no-audit --no-fund --loglevel=error || exit; node loopback-proxy.mjs & proxy=$!; trap "kill $proxy 2>/dev/null || true" EXIT INT TERM; "$@"' sh "$@"; then
+  "$PLAYWRIGHT_IMAGE" sh -c "npm ci --ignore-scripts --no-audit --no-fund --loglevel=error || exit; node loopback-proxy.mjs & proxy=\$!; trap 'kill \"\$proxy\" 2>/dev/null || true' EXIT INT TERM; \"\$@\"" sh "$@"; then
   printf '\nApp log (last 50 lines):\n' >&2
   "$engine" logs --tail 50 "$NAME-app" >&2 || true
   fail "the suite did not pass; the output above says which test failed, or why the runner could not start. For a failed test, open e2e/playwright-report/index.html, or its trace with: npx playwright show-trace e2e/test-results/<test>/trace.zip"
