@@ -4,7 +4,7 @@ import { Readable, Transform } from 'node:stream';
 import type { ContainerClient } from '@azure/storage-blob';
 import { fileTypeFromBuffer } from 'file-type';
 import type pg from 'pg';
-import { afterCommit, afterRollback } from '../db/tx.js';
+import { afterCommit, afterRollback, type Db } from '../db/tx.js';
 import { toApi, type Row } from './http.js';
 import { ApiError, invalid } from './problem.js';
 import { insertRow } from './rows.js';
@@ -89,7 +89,13 @@ function isText(sample: Buffer): boolean {
 }
 
 async function inspect(data: NodeJS.ReadableStream, name: string, allow: readonly string[]): Promise<Inspected> {
-  const iterator = (data as AsyncIterable<Uint8Array | string>)[Symbol.asyncIterator]();
+  const bounded = async function* (source: AsyncIterable<Uint8Array | string>) {
+    for await (const value of source) {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      for (let start = 0; start < chunk.length; start += SNIFF_BYTES) yield chunk.subarray(start, start + SNIFF_BYTES);
+    }
+  };
+  const iterator = bounded(data as AsyncIterable<Uint8Array | string>)[Symbol.asyncIterator]();
 
   const prefetched: Buffer[] = [];
   let remainder: Buffer | undefined;
@@ -115,16 +121,14 @@ async function inspect(data: NodeJS.ReadableStream, name: string, allow: readonl
   const stream = Readable.from(
     (async function* () {
       yield* prefetched;
-      if (remainder) {
-        for (let start = 0; start < remainder.length; start += SNIFF_BYTES) yield remainder.subarray(start, start + SNIFF_BYTES);
-      }
-      for await (const value of { [Symbol.asyncIterator]: () => iterator }) yield Buffer.isBuffer(value) ? value : Buffer.from(value);
+      if (remainder) yield remainder;
+      for await (const value of { [Symbol.asyncIterator]: () => iterator }) yield value;
     })(),
   );
   return { contentType: TYPES[kind], stream };
 }
 
-async function validateParents(db: pg.PoolClient, input: StoreFileInput): Promise<void> {
+async function validateParents(db: Db, input: StoreFileInput): Promise<void> {
   const check = async (table: 'project' | 'task' | 'comment', id: string | null | undefined, path: string) => {
     if (!id) return undefined;
     const { rows } = await db.query<{ workspace_id: string; project_id?: string; task_id?: string }>(
@@ -151,15 +155,30 @@ async function validateParents(db: pg.PoolClient, input: StoreFileInput): Promis
   }
 }
 
-function blobCleanup(path: string, block: ReturnType<ContainerClient['getBlockBlobClient']>) {
+function blobCleanup(workspaceId: string, path: string, block: ReturnType<ContainerClient['getBlockBlobClient']>) {
   return {
     kind: 'blob' as const,
+    workspaceId,
     key: path,
     run: async (pool: pg.Pool) => {
       // COMMIT can fail ambiguously after PostgreSQL accepted it. Never erase a Blob whose live row did commit.
-      const { rows } = await pool.query<{ deleted_at: Date | null }>('select deleted_at from file where blob_name = $1', [path]);
-      if (rows[0]?.deleted_at === null) return;
-      await block.deleteIfExists({ deleteSnapshots: 'include' });
+      const { rows } = await pool.query<{ found: boolean }>(
+        'select true as found from file where workspace_id = $1 and blob_name = $2 and deleted_at is null',
+        [workspaceId, path],
+      );
+      if (!rows[0]?.found) await block.deleteIfExists({ deleteSnapshots: 'include' });
+      await pool.query('delete from deferred_cleanup where kind = $1 and workspace_id = $2 and key = $3', ['blob', workspaceId, path]);
+    },
+  };
+}
+
+function finalizeIntent(workspaceId: string, path: string) {
+  return {
+    kind: 'blob' as const,
+    workspaceId,
+    key: path,
+    run: async (pool: pg.Pool) => {
+      await pool.query('delete from deferred_cleanup where kind = $1 and workspace_id = $2 and key = $3', ['blob', workspaceId, path]);
     },
   };
 }
@@ -170,21 +189,60 @@ function blobName(file: Row): string {
   return name;
 }
 
+function fileWorkspace(file: Row, path: string): string {
+  const workspaceId = file.workspace_id ?? file.workspaceId;
+  if (typeof workspaceId === 'string' && workspaceId) return workspaceId;
+  const fromPath = path.split('/')[1];
+  if (!fromPath || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(fromPath)) {
+    throw new Error('The file row has no workspace id');
+  }
+  return fromPath;
+}
+
+async function createIntent(pool: pg.Pool, workspaceId: string, path: string): Promise<void> {
+  // Twenty-four hours is deliberately much longer than a 25 MiB request. It prevents the hourly
+  // worker from racing a slow live upload, while still bounding how long a crash orphan can remain.
+  await pool.query(
+    `insert into deferred_cleanup (kind, workspace_id, key, available_at)
+     values ('blob', $1, $2, now() + interval '24 hours')`,
+    [workspaceId, path],
+  );
+}
+
+async function makeIntentReady(pool: pg.Pool, workspaceId: string, path: string): Promise<void> {
+  const updated = await pool.query(
+    `update deferred_cleanup
+        set attempts = attempts + 1, available_at = now(), last_attempt_at = now(), lease_token = null
+      where kind = 'blob' and workspace_id = $1 and key = $2`,
+    [workspaceId, path],
+  );
+  if (updated.rowCount !== 1) throw new Error('The durable Blob cleanup intent vanished before cleanup completed.');
+}
+
+export interface StagedFile {
+  readonly blobName: string;
+  /** Inserts the file row and registers commit/rollback finalization in the caller's tx(pool, ...). */
+  attach(db: pg.PoolClient): Promise<Row>;
+}
+
 /**
- * Sniffs and streams one upload to Blob, then inserts its file row using the caller's
- * transaction. A failed upload or insert deletes the partial blob before the error escapes.
+ * Sniffs an upload, commits a durable cleanup intent, then streams it to Blob without holding a
+ * caller transaction. The returned handle must be attached inside tx(pool, ...), together with
+ * the domain rows that reference it. A crash in any gap is repaired by the cleanup worker.
  */
-export async function storeFile(db: pg.PoolClient, blobs: ContainerClient, input: StoreFileInput): Promise<Row> {
+export async function storeFile(pool: pg.Pool, blobs: ContainerClient, input: StoreFileInput): Promise<StagedFile> {
   const name = safeName(input.name);
   const allow = input.allow ?? DEFAULT_ALLOW;
   const unknown = allow.filter(type => !(type in TYPES));
   if (unknown.length) throw new Error(`Unknown allowed upload type: ${unknown.join(', ')}`);
-  await validateParents(db, input);
+  // This avoids an unnecessary upload for an already-invalid parent. attach() repeats the checks
+  // in the write transaction so a concurrent move/delete cannot cross a workspace boundary.
+  await validateParents(pool, input);
   const { contentType, stream } = await inspect(input.data, name, allow);
   const id = randomUUID();
   const path = `${input.area}/${input.workspaceId}/${id}`;
   const block = blobs.getBlockBlobClient(path);
-  afterRollback(db, blobCleanup(path, block));
+  await createIntent(pool, input.workspaceId, path);
   const hash = createHash('sha256');
   let size = 0;
   const meter = new Transform({
@@ -199,24 +257,50 @@ export async function storeFile(db: pg.PoolClient, blobs: ContainerClient, input
     },
   });
 
-  await block.uploadStream(stream.pipe(meter), 4 * 1024 * 1024, 2, {
-    blobHTTPHeaders: { blobContentType: contentType },
-  });
-  const row = await insertRow(db, 'file', {
-    id,
-    workspace_id: input.workspaceId,
-    project_id: input.projectId ?? null,
-    task_id: input.taskId ?? null,
-    comment_id: input.commentId ?? null,
-    name,
-    content_type: contentType,
-    size_bytes: size,
-    sha256: hash.digest('hex'),
-    blob_container: input.area,
-    blob_name: path,
-    uploaded_by: input.uploadedBy,
-  });
-  return toApi(row);
+  try {
+    await block.uploadStream(stream.pipe(meter), 4 * 1024 * 1024, 2, {
+      blobHTTPHeaders: { blobContentType: contentType },
+    });
+  } catch (uploadError) {
+    try {
+      await blobCleanup(input.workspaceId, path, block).run(pool);
+    } catch (cleanupError) {
+      try {
+        await makeIntentReady(pool, input.workspaceId, path);
+      } catch (queueError) {
+        throw new AggregateError([uploadError, cleanupError, queueError], 'The upload failed, and neither its Blob cleanup nor durable retry could finish.');
+      }
+      throw new AggregateError([uploadError, cleanupError], 'The upload failed and its Blob cleanup was queued for retry.');
+    }
+    throw uploadError;
+  }
+  const sha256 = hash.digest('hex');
+  let attached = false;
+  return {
+    blobName: path,
+    attach: async db => {
+      if (attached) throw new Error('This staged file has already been attached.');
+      attached = true;
+      afterRollback(db, blobCleanup(input.workspaceId, path, block));
+      afterCommit(db, finalizeIntent(input.workspaceId, path));
+      await validateParents(db, input);
+      const row = await insertRow(db, 'file', {
+        id,
+        workspace_id: input.workspaceId,
+        project_id: input.projectId ?? null,
+        task_id: input.taskId ?? null,
+        comment_id: input.commentId ?? null,
+        name,
+        content_type: contentType,
+        size_bytes: size,
+        sha256,
+        blob_container: input.area,
+        blob_name: path,
+        uploaded_by: input.uploadedBy,
+      });
+      return toApi(row);
+    },
+  };
 }
 
 export async function readFile(blobs: ContainerClient, file: Row): Promise<NodeJS.ReadableStream> {
@@ -231,5 +315,5 @@ export async function discardFile(db: pg.PoolClient, blobs: ContainerClient, fil
   if (typeof id !== 'string' || !id) throw new Error('The file row has no id');
   await db.query(`update file set deleted_at = now(), version = version + 1 where id = $1 and deleted_at is null`, [id]);
   const path = blobName(file);
-  afterCommit(db, blobCleanup(path, blobs.getBlockBlobClient(path)));
+  afterCommit(db, blobCleanup(fileWorkspace(file, path), path, blobs.getBlockBlobClient(path)));
 }

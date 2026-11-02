@@ -7,7 +7,7 @@ import { postgresSessions } from './auth/sessions.js';
 import { ConfigError, loadConfig, type Config } from './config.js';
 import { createContainer, createPool, databaseCheck, storageCheck } from './dependencies.js';
 import { expireIdempotencyKeys } from './api/rows.js';
-import { retryDeferredCleanups } from './db/tx.js';
+import { DeferredCleanupBatchError, retryDeferredCleanups } from './db/tx.js';
 import { healthReporter } from './health.js';
 import { managedIdentity } from './managed-identity.js';
 
@@ -61,13 +61,39 @@ const expireKeys = () => {
   });
 };
 const cleanBlobs = () => {
-  retryDeferredCleanups(pool, 'blob', async key => {
-    const { rows } = await pool.query<{ deleted_at: Date | null }>('select deleted_at from file where blob_name = $1', [key]);
-    if (rows[0]?.deleted_at === null) return;
-    await blobs.getBlockBlobClient(key).deleteIfExists({ deleteSnapshots: 'include' });
-  }).catch((error: unknown) => {
-    app.log.warn({ err: error }, 'queued Blob cleanup could not finish; the next hourly run tries again');
-  });
+  retryDeferredCleanups(pool, 'blob', async item => {
+    const { rows } = await pool.query<{ found: boolean }>('select true as found from file where workspace_id = $1 and blob_name = $2 and deleted_at is null', [
+      item.workspaceId,
+      item.key,
+    ]);
+    if (!rows[0]?.found) await blobs.getBlockBlobClient(item.key).deleteIfExists({ deleteSnapshots: 'include' });
+  })
+    .then(report => {
+      const telemetry = {
+        completed: report.completed,
+        queueDepth: report.queueDepth,
+        oldestAgeSeconds: Math.round(report.oldestAgeSeconds),
+        maxAttempts: report.maxAttempts,
+      };
+      app.log.info(telemetry, 'Blob cleanup reconciliation finished');
+      // Five failed attempts or 24 hours in the queue is the operator-escalation threshold.
+      // Rows keep retrying hourly: private data is not abandoned in an automatic dead letter.
+      if (report.needsEscalation) app.log.error(telemetry, 'Blob cleanup queue needs operator attention');
+    })
+    .catch((error: unknown) => {
+      const report = error instanceof DeferredCleanupBatchError ? error.report : undefined;
+      const telemetry = {
+        err: error,
+        completed: report?.completed,
+        queueDepth: report?.queueDepth,
+        oldestAgeSeconds: report ? Math.round(report.oldestAgeSeconds) : undefined,
+        maxAttempts: report?.maxAttempts,
+        failures: report?.failures,
+      };
+      const message = 'queued Blob cleanup could not finish; the next hourly run tries again';
+      if (report?.needsEscalation) app.log.error(telemetry, message);
+      else app.log.warn(telemetry, message);
+    });
 };
 expireKeys();
 cleanBlobs();

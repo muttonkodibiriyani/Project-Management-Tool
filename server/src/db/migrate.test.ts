@@ -114,6 +114,29 @@ test('every update moves a row onto the change feed', async t => {
   assert.ok(BigInt(updated.rows[0]?.change_seq ?? 0) > BigInt(row.change_seq));
 });
 
+test('deferred Blob cleanup rows are workspace-scoped opaque paths', async t => {
+  if (skipWithoutDatabase(t)) return;
+  const db = await emptyDatabase(t);
+  const owner = await db.connect();
+  await migrate(owner, () => undefined);
+  const workspace = await owner.query<{ id: string }>("insert into workspace (slug, name) values ('cleanup', 'Cleanup') returning id");
+  const workspaceId = workspace.rows[0]?.id ?? '';
+  const fileId = '11111111-1111-4111-8111-111111111111';
+  const valid = `attachments/${workspaceId}/${fileId}`;
+
+  await owner.query("insert into deferred_cleanup (kind, workspace_id, key) values ('blob', $1, $2)", [workspaceId, valid]);
+  await assert.rejects(
+    owner.query("insert into deferred_cleanup (kind, workspace_id, key) values ('blob', $1, $2)", [
+      workspaceId,
+      `attachments/22222222-2222-4222-8222-222222222222/${fileId}`,
+    ]),
+    { code: '23514' },
+  );
+  await assert.rejects(owner.query("insert into deferred_cleanup (kind, workspace_id, key) values ('blob', $1, 'imports/not-opaque')", [workspaceId]), {
+    code: '23514',
+  });
+});
+
 test('the app role may add activity but never change or delete it, and may not touch the migration record', async t => {
   if (skipWithoutDatabase(t)) return;
   const db = await emptyDatabase(t);
