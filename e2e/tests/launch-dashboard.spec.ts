@@ -2,7 +2,7 @@ import { expect, openFromSidebar, openProject, projectView, test } from './fixtu
 
 const LAUNCH = 'Synthetic two-store launch';
 
-test('launch overview, fixtures and directories are computed from canonical launch data', async ({ app: page }) => {
+test('launch overview, fixtures and public directories are computed without exposing restricted data', async ({ app: page }) => {
   await openProject(page, LAUNCH);
   await expect(page).toHaveTitle(/^Table · Synthetic two-store launch/);
 
@@ -23,12 +23,14 @@ test('launch overview, fixtures and directories are computed from canonical laun
 
   await openFromSidebar(page, 'Brands & vendors');
   await expect(page.getByRole('cell', { name: 'Sample Distribution A', exact: true }).first()).toBeVisible();
-  await expect(page.getByRole('cell', { name: /35%/ }).first()).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'Restricted', exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('cell', { name: /35%/ })).toHaveCount(0);
   await page
     .getByRole('navigation', { name: 'Brand directory views' })
     .getByRole('button', { name: /Contacts/ })
     .click();
-  await expect(page.getByRole('link', { name: 'contact1@example.test' })).toBeVisible();
+  await expect(page.getByText('Contact details are restricted.')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'contact1@example.test' })).toHaveCount(0);
 });
 
 test('one click raises a linked follow-up in the owner flow', async ({ app: page }) => {

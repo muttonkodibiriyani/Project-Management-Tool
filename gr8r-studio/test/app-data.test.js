@@ -3,7 +3,7 @@ import test from 'node:test';
 
 globalThis.document = { querySelectorAll: () => [] };
 const { installDataSync } = await import('../src/core/app-data.js');
-const { _saveT, COMPAT_UI_KEY, emptyData, registerSync, replaceStoreData, S, save, STORE_KEY } = await import('../src/core/store.js');
+const { _saveT, COMPAT_UI_KEY, emptyData, registerSync, replaceStoreData, S, save, STORE_KEY, syncInstalled } = await import('../src/core/store.js');
 
 class MemoryStorage {
   #values = new Map();
@@ -78,6 +78,7 @@ function installCompatibilityData() {
 test('the production compatibility workspace starts in memory without restricted directory data', () => {
   assert.ok(S.data.projects.length > 0);
   assert.equal(S.authorized.launchDirectory, null);
+  assert.equal(syncInstalled(), false, 'compatibility mode cannot claim that an offline edit was queued');
 });
 
 test('tab compatibility storage allowlists UI preferences and never stores workspace or restricted data', async t => {
@@ -167,6 +168,7 @@ test('sync installation clears compatibility data before every request and stays
       assert.equal(requests, 1, 'the first request starts only after the synchronous reset');
       assertCompatibilityCleared(renders);
       await assert.rejects(pending);
+      assert.equal(syncInstalled(), false, 'failed boot never exposes an offline outbox');
       assert.equal(renders, 0);
       assert.deepEqual(S.data.projects, []);
       assert.equal(requests, failure === 'bootstrap' ? 2 : 1);
@@ -177,6 +179,7 @@ test('sync installation clears compatibility data before every request and stays
 test('the first authenticated bootstrap replaces the cleared compatibility workspace', async t => {
   const previousFetch = globalThis.fetch;
   t.after(() => {
+    registerSync(null);
     globalThis.fetch = previousFetch;
   });
   installCompatibilityData();
@@ -202,6 +205,7 @@ test('the first authenticated bootstrap replaces the cleared compatibility works
   session.stop();
 
   assert.equal(typeof session.queueSnapshot, 'function');
+  assert.equal(syncInstalled(), true, 'successful authenticated boot installs the offline outbox');
   assert.equal(renders, 1);
   assert.equal(S.data.ws.id, 'workspace-1');
   assert.equal(S.data.projects[0].id, 'project-1');

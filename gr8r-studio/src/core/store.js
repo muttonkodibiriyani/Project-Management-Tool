@@ -171,6 +171,11 @@ export function registerSync(handler) {
   syncHandler = handler;
 }
 
+/** True only when authenticated sync can durably queue a mutation for retry. */
+export function syncInstalled() {
+  return syncHandler !== null;
+}
+
 /** Replace the visible workspace after an authenticated cache or API read. */
 export function replaceStoreData(data, prefs) {
   S.data = data;
