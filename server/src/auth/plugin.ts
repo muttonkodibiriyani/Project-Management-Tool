@@ -65,7 +65,7 @@ export function installAuth(app: FastifyInstance, options: AuthOptions): void {
     });
 
     // Signing out twice, or after the session ended, still clears the cookie and answers the same.
-    auth.post('/auth/logout', async (request, reply) => {
+    auth.post('/auth/logout', { config: { rateLimit: false } }, async (request, reply) => {
       if (request.headers[CSRF_HEADER] !== CSRF_VALUE) {
         return sendProblem(
           request,

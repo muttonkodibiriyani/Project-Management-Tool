@@ -123,3 +123,15 @@ test('off Azure X-Forwarded-For is ignored, so the sign-in limit keys on the con
   for (let attempt = 1; attempt <= AUTH_RATE_LIMIT; attempt++) assert.equal((await signIn(`203.0.113.${String(attempt)}`)).statusCode, 302);
   assert.equal((await signIn('203.0.113.99')).statusCode, 429);
 });
+
+test('sign-out does not consume the sign-in quota', async () => {
+  const local = app();
+  for (let attempt = 1; attempt <= AUTH_RATE_LIMIT; attempt++) {
+    const response = await local.inject({ method: 'POST', url: '/auth/logout', headers: { 'x-requested-with': 'launch-tracker' } });
+    assert.equal(response.statusCode, 200);
+  }
+  for (let attempt = 1; attempt <= AUTH_RATE_LIMIT; attempt++) {
+    const response = await local.inject('/auth/dev-login?email=viewer@example.test');
+    assert.equal(response.statusCode, 302);
+  }
+});
