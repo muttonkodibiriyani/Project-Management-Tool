@@ -44,6 +44,79 @@ const PROFILE = {
   permissions: { synthetic: { margins: true, contacts: false } },
 };
 
+function applyPreferencePatch(profile, patch) {
+  const prefs = { ...profile.prefs };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete prefs[key];
+    else prefs[key] = value;
+  }
+  return { ...profile, prefs, user: { ...profile.user, version: profile.user.version + 1 } };
+}
+
+async function preferenceRestart({ applyFirst = false, beforeRestart = profile => profile } = {}) {
+  const storage = new MemoryStorage();
+  let serverProfile = { ...structuredClone(PROFILE), prefs: { theme: 'dark', density: 'compact' } };
+  let visible;
+  let attempts = 0;
+  const etags = [];
+  const patches = [];
+  const conflicts = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me' && !options.method) return { data: structuredClone(serverProfile) };
+    if (path === '/api/v1/me' && options.method === 'PATCH') {
+      attempts += 1;
+      etags.push(options.etag);
+      patches.push(structuredClone(options.body.prefs));
+      if (attempts === 1) {
+        if (applyFirst) serverProfile = applyPreferencePatch(serverProfile, options.body.prefs);
+        return new Promise(() => {});
+      }
+      assert.equal(options.etag, serverProfile.user.version);
+      serverProfile = applyPreferencePatch(serverProfile, options.body.prefs);
+      return { data: structuredClone(serverProfile) };
+    }
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(BOOT) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onConflict: error => conflicts.push(error),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  first.queueSnapshot({ data: structuredClone(visible), prefs: { theme: 'light', density: 'compact' } });
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  await waitFor(() => {
+    assert.equal(attempts, 1);
+    assert.equal(JSON.parse(storage.getItem(pointer.key)).outbox[0].revalidate, true);
+  });
+  first.stop();
+
+  serverProfile = beforeRestart(serverProfile);
+  const resumed = createSync(options);
+  await resumed.start();
+  resumed.stop();
+
+  return {
+    attempts,
+    etags,
+    patches,
+    conflicts,
+    serverProfile,
+    cached: JSON.parse(storage.getItem(pointer.key)),
+  };
+}
+
 const BOOT = {
   changeSeq: 7,
   workspace: { id: 'workspace-1', slug: 'synthetic', name: 'Synthetic' },
@@ -250,6 +323,21 @@ test('diffs order dependent project, task and comment creates', () => {
     buildMutations({ projects: [], tasks: [], comments: [] }, after).map(item => item.resource),
     ['project', 'task', 'comment'],
   );
+});
+
+test('preference mutation plans persist only the intended merge-patch fields', () => {
+  const [operation] = buildMutations(
+    { projects: [], tasks: [], comments: [] },
+    { projects: [], tasks: [], comments: [] },
+    { theme: 'dark', density: 'compact', motion: true },
+    { theme: 'light', accent: 'blue', motion: true },
+  );
+  assert.deepEqual(operation, {
+    resource: 'prefs',
+    action: 'update',
+    before: { theme: 'dark', density: 'compact', motion: true },
+    row: { theme: 'light', density: null, accent: 'blue' },
+  });
 });
 
 test('boot validates identity before cache use and never caches restricted directory rows', async () => {
@@ -496,6 +584,47 @@ test('a pre-call marker retries once when process death happened before server a
   assert.deepEqual(etags, [1, 1]);
   assert.equal(serverBoot.projects[0].name, 'Retry after process death');
   assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
+test('an accepted preference edit with a never-settling response is not replayed', async () => {
+  const result = await preferenceRestart({
+    applyFirst: true,
+    beforeRestart: profile => applyPreferencePatch(profile, { density: 'roomy' }),
+  });
+
+  assert.equal(result.attempts, 1);
+  assert.deepEqual(result.etags, [2]);
+  assert.deepEqual(result.patches, [{ theme: 'light' }]);
+  assert.deepEqual(result.serverProfile.prefs, { theme: 'light', density: 'roomy' }, 'an unrelated later preference remains intact');
+  assert.deepEqual(result.conflicts, []);
+  assert.deepEqual(result.cached.outbox, []);
+});
+
+test('a preference edit retries only its delta when intended fields still equal the baseline', async () => {
+  const result = await preferenceRestart({
+    beforeRestart: profile => applyPreferencePatch(profile, { density: 'roomy' }),
+  });
+
+  assert.equal(result.attempts, 2);
+  assert.deepEqual(result.etags, [2, 3]);
+  assert.deepEqual(result.patches, [{ theme: 'light' }, { theme: 'light' }]);
+  assert.deepEqual(result.serverProfile.prefs, { theme: 'light', density: 'roomy' }, 'the merge patch preserves an unrelated concurrent field');
+  assert.deepEqual(result.conflicts, []);
+  assert.deepEqual(result.cached.outbox, []);
+});
+
+test('a concurrent change to an intended preference conflicts without replay', async () => {
+  const result = await preferenceRestart({
+    beforeRestart: profile => applyPreferencePatch(profile, { theme: 'blue' }),
+  });
+
+  assert.equal(result.attempts, 1, 'the stale preference edit is not replayed');
+  assert.deepEqual(result.etags, [2]);
+  assert.deepEqual(result.serverProfile.prefs, { theme: 'blue', density: 'compact' });
+  assert.equal(result.conflicts.length, 1);
+  assert.equal(result.conflicts[0].status, 409);
+  assert.deepEqual(result.conflicts[0].current, { prefs: { theme: 'blue', density: 'compact' }, version: 3 });
+  assert.equal(result.cached.outbox.length, 1, 'the conflicted plan remains available for explicit resolution');
 });
 
 test('accepted project, task and comment edits survive lost responses and resume later work', async () => {

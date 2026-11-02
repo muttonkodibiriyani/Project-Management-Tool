@@ -32,6 +32,13 @@ const RESOURCE_LIST = {
 
 const json = value => JSON.parse(JSON.stringify(value));
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
+const preferencePatch = (before, after) =>
+  Object.fromEntries(
+    [...new Set([...Object.keys(before || {}), ...Object.keys(after || {})])]
+      .filter(key => !same(before?.[key], after?.[key]) || hasOwn(before, key) !== hasOwn(after, key))
+      .map(key => [key, hasOwn(after, key) ? after[key] : null]),
+  );
 const time = value => (value ? new Date(value).getTime() : null);
 const minutesSince = value => (value ? Math.max(0, Math.round((Date.now() - time(value)) / 60_000)) : null);
 const colourName = value => {
@@ -349,7 +356,8 @@ export function buildMutations(before, after, prefsBefore = {}, prefsAfter = {})
     const old = (before?.notifs || []).find(item => item.id === row.id);
     if (old && (old.read !== row.read || old.archived !== row.archived)) operations.push({ resource: 'notification', action: 'update', before: old, row });
   }
-  if (!same(prefsBefore, prefsAfter)) operations.push({ resource: 'prefs', action: 'update', before: prefsBefore, row: prefsAfter });
+  if (!same(prefsBefore, prefsAfter))
+    operations.push({ resource: 'prefs', action: 'update', before: prefsBefore, row: preferencePatch(prefsBefore, prefsAfter) });
   const rank = {
     project: 1,
     task: 2,
@@ -433,7 +441,18 @@ export function createSync({
   // landed; otherwise the original ETag remains authoritative.
   const reconciledMutation = operation => {
     if (!state?.base || operation.action === 'create' || operation.resource === 'followUp') return null;
-    if (operation.resource === 'prefs') return same(profile.prefs, operation.row) ? { applied: true, row: null } : null;
+    if (operation.resource === 'prefs') {
+      const fields = Object.keys(operation.row || {});
+      const desiredMatches = fields.every(key =>
+        operation.row[key] === null ? !hasOwn(profile.prefs, key) : hasOwn(profile.prefs, key) && same(profile.prefs[key], operation.row[key]),
+      );
+      if (desiredMatches) return { applied: true, row: null };
+      const beforeMatches = fields.every(key =>
+        hasOwn(operation.before, key) ? hasOwn(profile.prefs, key) && same(profile.prefs[key], operation.before[key]) : !hasOwn(profile.prefs, key),
+      );
+      if (beforeMatches) return null;
+      return { conflict: true, row: { prefs: profile.prefs, version: profile.user.version } };
+    }
     const currentData = toLegacyData(state.base, profile, null, sessions);
     const id = String(resolve(operation.row?.id));
     let current;
@@ -767,7 +786,6 @@ export function createSync({
         const index = state.outbox.findIndex(item => item.id === pending.id);
         if (index >= 0) state.outbox.splice(index, 1);
         if (state.outbox.length === 0) state.rowCheckpoints = {};
-        profile.prefs = pending.prefs;
         persist();
         await bootstrap({ publishData: state.outbox.length === 0 });
       }
