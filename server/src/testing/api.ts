@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import pg from 'pg';
+import type { Access } from '../access/policy.js';
 import { buildApp } from '../app.js';
 import { APP_ROLES, type AppRole } from '../auth/roles.js';
 import { SESSION_COOKIE } from '../auth/plugin.js';
@@ -34,8 +35,16 @@ export const WS = 'synthetic';
 /** The routes tasks.test.ts covers; workspace.test.ts covers the rest of the API. */
 export const TASK_ROUTES = ['/w/:ws/tasks', '/w/:ws/follow-ups', '/w/:ws/subtasks', '/w/:ws/comments'];
 
+export interface RegisteredRoute {
+  method: string;
+  url: string;
+  access: Access;
+}
+
 export interface Fixture {
   app: FastifyInstance;
+  /** Every real /api/v1 route and the access declaration enforced by the API hook. */
+  routes: readonly RegisteredRoute[];
   /** The database as its owner, for setting up rows and checking what was written. */
   db: pg.Client;
   workspaceId: string;
@@ -136,9 +145,15 @@ export async function apiFixture(t: TestContext): Promise<Fixture> {
     health: () => Promise.resolve({ status: 'ok', commit: '', imageDigest: '', checks: [] }),
     auth: devAuth(),
   });
-  const routes = new Set<string>();
+  const routeMap = new Map<string, RegisteredRoute>();
   app.addHook('onRoute', route => {
-    if (route.url.startsWith('/api/v1/')) for (const method of [route.method].flat()) if (method !== 'HEAD') routes.add(`${method} ${route.url}`);
+    if (route.url.startsWith('/api/v1/')) {
+      for (const method of [route.method].flat()) {
+        if (method === 'HEAD') continue;
+        const key = `${method} ${route.url}`;
+        routeMap.set(key, { method, url: route.url, access: route.config?.access as Access });
+      }
+    }
   });
   const called = new Set<string>();
   app.addHook('onResponse', (request, _reply, done) => {
@@ -165,12 +180,12 @@ export async function apiFixture(t: TestContext): Promise<Fixture> {
 
   const assertCovered: Fixture['assertCovered'] = (prefixes, except = []) => {
     const under = (route: string, list: string[]) => list.some(prefix => route.split(' ')[1]?.startsWith(`/api/v1${prefix}`));
-    const missed = [...routes].filter(route => under(route, prefixes) && !under(route, except) && !called.has(route));
+    const missed = [...routeMap.keys()].filter(route => under(route, prefixes) && !under(route, except) && !called.has(route));
     assert.deepEqual(missed, [], 'every route has a test');
   };
 
   assert.equal(Object.keys(USERS).length - 1, APP_ROLES.length, 'one test user per app role');
-  return { app, db, workspaceId, users, teams, stores, templateId, brandId, call, session, assertCovered };
+  return { app, routes: [...routeMap.values()], db, workspaceId, users, teams, stores, templateId, brandId, call, session, assertCovered };
 }
 
 /** If-Match for the version a response carried. */

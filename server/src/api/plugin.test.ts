@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import Fastify, { type LightMyRequestResponse } from 'fastify';
 import pg from 'pg';
+import { allows, isAccess } from '../access/policy.js';
 import type { AppRole } from '../auth/roles.js';
 import { SESSION_COOKIE } from '../auth/plugin.js';
 import { apiFixture, USERS, WS, type UserName } from '../testing/api.js';
@@ -11,6 +12,16 @@ import { api, RATE_LIMIT } from './plugin.js';
 
 const MEMBERS = (Object.keys(USERS) as UserName[]).filter(name => name !== 'outsider');
 const problem = (response: LightMyRequestResponse) => response.json<{ code: string; detail: string }>();
+const TEST_ID = '00000000-0000-4000-8000-000000000000';
+
+function requestPath(url: string): string {
+  return url
+    .slice('/api/v1'.length)
+    .replace('/w/:ws', `/w/${WS}`)
+    .replace('/:emoji', '/wave')
+    .replace(/:[A-Za-z][A-Za-z0-9]*/g, TEST_ID)
+    .replace(/\/\*$/, '/no-such-route');
+}
 
 test('a route without a valid access list stops the API from starting', async () => {
   // These apps never query: a pool only connects on its first query.
@@ -77,6 +88,34 @@ test('the API, with real sessions in PostgreSQL', async t => {
     assert.equal(response.statusCode, 404);
     assert.equal(problem(response).code, 'not_found');
     assert.equal((await f.call('outsider', 'GET', '/me')).statusCode, 200);
+  });
+
+  await t.test('every registered route enforces its complete seven-role matrix', async () => {
+    assert.ok(f.routes.length > 40, 'the matrix covers the real API, not a small test plugin');
+    for (const route of f.routes) {
+      assert.equal(isAccess(route.access), true, `${route.method} ${route.url} has a valid access declaration`);
+      for (const name of MEMBERS) {
+        const role = USERS[name];
+        const expected = allows(route.access, { roles: [role] });
+        const response = await f.call(name, route.method, requestPath(route.url));
+        assert.equal(
+          response.statusCode === 403,
+          !expected,
+          `${role} ${route.method} ${route.url}: expected ${expected ? 'the route to run' : 'the route guard to refuse'}`,
+        );
+        if (!expected) assert.equal(problem(response).code, 'forbidden', `${role} ${route.method} ${route.url}`);
+      }
+    }
+  });
+
+  await t.test('every workspace-scoped route checks membership before its handler', async () => {
+    const workspaceRoutes = f.routes.filter(route => route.url.includes('/w/:ws'));
+    assert.ok(workspaceRoutes.length > 30, 'the isolation check covers every workspace resource group');
+    for (const route of workspaceRoutes) {
+      const response = await f.call('outsider', route.method, requestPath(route.url));
+      assert.equal(response.statusCode, 404, `${route.method} ${route.url}`);
+      assert.equal(problem(response).code, 'not_found', `${route.method} ${route.url}`);
+    }
   });
 
   await t.test('every role is checked on the server, and a refused write never reaches the database', async () => {
