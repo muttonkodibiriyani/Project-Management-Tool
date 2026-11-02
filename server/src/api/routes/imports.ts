@@ -48,7 +48,6 @@ function publicJob(row: JobRow, sheets?: ReturnType<typeof sheetSummary>): Row {
   const rendered = toApi(row);
   delete rendered.workspaceId;
   delete rendered.blobName;
-  delete rendered.fileName;
   if (rendered.summary && typeof rendered.summary === 'object' && !Array.isArray(rendered.summary)) {
     rendered.summary = Object.fromEntries(Object.entries(rendered.summary as Record<string, unknown>).filter(([key]) => key !== 'previewVersions'));
   }
@@ -572,10 +571,8 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
       if ((error as Error).name === 'ImportConflictError') {
         throw new ApiError(409, 'version_conflict', `${(error as Error).message} Preview again so the newer values are not overwritten.`);
       }
-      await pool.query(`update import_job set status='failed',summary=$2,version=version+1 where id=$1 and status <> 'committed'`, [
-        job.id,
-        JSON.stringify({ error: 'The import did not finish. Nothing was changed; preview it and commit again.' }),
-      ]);
+      // commitPrepared owns one database transaction. Its rollback leaves this
+      // preview and version intact, so the caller can safely press Commit again.
       throw error;
     }
     return withEtag(reply, publicJob(await readJob(pool, workspaceOf(request).id, job.id)));

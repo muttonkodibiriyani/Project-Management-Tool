@@ -118,6 +118,8 @@ test('both synthetic layouts commit atomically and a re-import is duplicate-free
   assert.deepEqual(first.summary, firstDraft.plan.summary);
   assert.equal(first.changedKeys.length, 1);
   assert.equal(await f.count('select count(*) from task where project_id=$1', [f.projectId]), 1);
+  const original = (await f.admin.query<{ id: string; version: number }>('select id,version from task where project_id=$1', [f.projectId])).rows[0];
+  assert.ok(original);
 
   const secondJob = await f.job();
   const secondDraft = await prepareAgainstDatabase(f.pool, f.projectId, launch);
@@ -125,6 +127,7 @@ test('both synthetic layouts commit atomically and a re-import is duplicate-free
   const second = await commitPrepared(f.pool, f.request, secondJob, 1, secondDraft);
   assert.deepEqual(second.changedKeys, []);
   assert.equal(await f.count('select count(*) from task where project_id=$1', [f.projectId]), 1);
+  assert.deepEqual((await f.admin.query<{ id: string; version: number }>('select id,version from task where project_id=$1', [f.projectId])).rows[0], original);
 
   const edited = prepared(
     'launch_tracker',
