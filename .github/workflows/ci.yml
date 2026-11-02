@@ -43,6 +43,12 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+      azurite:
+        image: mcr.microsoft.com/azure-storage/azurite:3.37.0@sha256:830430c1da1a2d537e08f3e6764dd1f5ae00cf0346bcaf625b968ec3f0971fd5
+        env:
+          AZURITE_ACCOUNTS: launchtracker:c3ludGhldGljLWxhdW5jaC10cmFja2VyLXRlc3Qta2V5LTEyMzQ1Ng==
+        ports:
+          - 10000:10000
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,6 +72,7 @@ jobs:
         working-directory: server
         env:
           TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
+          TEST_BLOB_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=launchtracker;AccountKey=c3ludGhldGljLWxhdW5jaC10cmFja2VyLXRlc3Qta2V5LTEyMzQ1Ng==;BlobEndpoint=http://127.0.0.1:10000/launchtracker; # gitleaks:allow -- synthetic Azurite-only key
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run lint

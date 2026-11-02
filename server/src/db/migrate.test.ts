@@ -16,6 +16,7 @@ const TABLES = [
   'comment_mention',
   'comment_reaction',
   'contact',
+  'deferred_cleanup',
   'event',
   'favourite',
   'field_def',
@@ -57,7 +58,7 @@ test('migrations build the whole schema in an empty database, and a second run a
   const db = await emptyDatabase(t);
   const owner = await db.connect();
 
-  assert.deepEqual(await migrate(owner, () => undefined), ['0001_init', '0002_import_store_map']);
+  assert.deepEqual(await migrate(owner, () => undefined), ['0001_init', '0002_import_store_map', '0003_deferred_cleanup']);
   const { rows: tables } = await owner.query<{ name: string }>(
     "select table_name as name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE' order by 1",
   );
@@ -75,7 +76,7 @@ test('migrations build the whole schema in an empty database, and a second run a
   const { rows: applied } = await owner.query<{ name: string }>('select name from migrations.pgmigrations');
   assert.deepEqual(
     applied.map(row => row.name),
-    ['0001_init', '0002_import_store_map'],
+    ['0001_init', '0002_import_store_map', '0003_deferred_cleanup'],
   );
   const { rows: storeMap } = await owner.query<{ type: string; nullable: string; fallback: string }>(
     `select data_type as type, is_nullable as nullable, column_default as fallback

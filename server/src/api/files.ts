@@ -4,8 +4,9 @@ import { Readable, Transform } from 'node:stream';
 import type { ContainerClient } from '@azure/storage-blob';
 import { fileTypeFromBuffer } from 'file-type';
 import type pg from 'pg';
+import { afterCommit, afterRollback } from '../db/tx.js';
 import { toApi, type Row } from './http.js';
-import { ApiError } from './problem.js';
+import { ApiError, invalid } from './problem.js';
 import { insertRow } from './rows.js';
 
 export const UPLOAD_LIMIT = 25 * 1024 * 1024;
@@ -18,7 +19,6 @@ const TYPES = {
   gif: 'image/gif',
   webp: 'image/webp',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  xls: 'application/vnd.ms-excel',
   csv: 'text/csv; charset=utf-8',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -36,9 +36,6 @@ const DETECTED_TYPES: Record<string, AllowedType> = {
   gif: 'gif',
   webp: 'webp',
   xlsx: 'xlsx',
-  // file-type identifies the compound binary container used by legacy Excel. The original
-  // name selects XLS only after that binary signature has been verified.
-  cfb: 'xls',
   docx: 'docx',
   pptx: 'pptx',
   zip: 'zip',
@@ -95,31 +92,76 @@ async function inspect(data: NodeJS.ReadableStream, name: string, allow: readonl
   const iterator = (data as AsyncIterable<Uint8Array | string>)[Symbol.asyncIterator]();
 
   const prefetched: Buffer[] = [];
+  let remainder: Buffer | undefined;
   const sampleParts: Buffer[] = [];
   let sampled = 0;
   while (sampled < SNIFF_BYTES) {
     const next = await iterator.next();
     if (next.done) break;
     const chunk = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
-    prefetched.push(chunk);
     const wanted = Math.min(chunk.length, SNIFF_BYTES - sampled);
-    sampleParts.push(chunk.subarray(0, wanted));
+    const samplePart = chunk.subarray(0, wanted);
+    prefetched.push(samplePart);
+    sampleParts.push(samplePart);
     sampled += wanted;
+    if (wanted < chunk.length) remainder = chunk.subarray(wanted);
   }
   const sample = Buffer.concat(sampleParts, sampled);
   const detected = await fileTypeFromBuffer(sample, { maxBufferSize: SNIFF_BYTES });
   let kind = detected ? DETECTED_TYPES[detected.ext] : undefined;
-  if (kind === 'xls' && extname(name).toLowerCase() !== '.xls') kind = undefined;
   if (!kind && isText(sample)) kind = extname(name).toLowerCase() === '.csv' || (allow.length === 1 && allow[0] === 'csv') ? 'csv' : 'txt';
   if (!kind || !allow.includes(kind)) throw unsupported(allow);
 
   const stream = Readable.from(
     (async function* () {
       yield* prefetched;
+      if (remainder) {
+        for (let start = 0; start < remainder.length; start += SNIFF_BYTES) yield remainder.subarray(start, start + SNIFF_BYTES);
+      }
       for await (const value of { [Symbol.asyncIterator]: () => iterator }) yield Buffer.isBuffer(value) ? value : Buffer.from(value);
     })(),
   );
   return { contentType: TYPES[kind], stream };
+}
+
+async function validateParents(db: pg.PoolClient, input: StoreFileInput): Promise<void> {
+  const check = async (table: 'project' | 'task' | 'comment', id: string | null | undefined, path: string) => {
+    if (!id) return undefined;
+    const { rows } = await db.query<{ workspace_id: string; project_id?: string; task_id?: string }>(
+      `select workspace_id,
+              ${table === 'task' ? 'project_id' : 'null::uuid as project_id'},
+              ${table === 'comment' ? 'task_id' : 'null::uuid as task_id'}
+         from ${table} where id = $1 and deleted_at is null`,
+      [id],
+    );
+    const row = rows[0];
+    if (!row || row.workspace_id !== input.workspaceId) {
+      throw invalid([{ path, code: 'unknown_ref', message: `${path} is not a live row in this workspace.` }]);
+    }
+    return row;
+  };
+  const project = await check('project', input.projectId, 'projectId');
+  const task = await check('task', input.taskId, 'taskId');
+  const comment = await check('comment', input.commentId, 'commentId');
+  if (project && task?.project_id !== input.projectId) {
+    throw invalid([{ path: 'taskId', code: 'unknown_ref', message: 'taskId does not belong to projectId.' }]);
+  }
+  if (task && comment?.task_id !== input.taskId) {
+    throw invalid([{ path: 'commentId', code: 'unknown_ref', message: 'commentId does not belong to taskId.' }]);
+  }
+}
+
+function blobCleanup(path: string, block: ReturnType<ContainerClient['getBlockBlobClient']>) {
+  return {
+    kind: 'blob' as const,
+    key: path,
+    run: async (pool: pg.Pool) => {
+      // COMMIT can fail ambiguously after PostgreSQL accepted it. Never erase a Blob whose live row did commit.
+      const { rows } = await pool.query<{ deleted_at: Date | null }>('select deleted_at from file where blob_name = $1', [path]);
+      if (rows[0]?.deleted_at === null) return;
+      await block.deleteIfExists({ deleteSnapshots: 'include' });
+    },
+  };
 }
 
 function blobName(file: Row): string {
@@ -137,10 +179,12 @@ export async function storeFile(db: pg.PoolClient, blobs: ContainerClient, input
   const allow = input.allow ?? DEFAULT_ALLOW;
   const unknown = allow.filter(type => !(type in TYPES));
   if (unknown.length) throw new Error(`Unknown allowed upload type: ${unknown.join(', ')}`);
+  await validateParents(db, input);
   const { contentType, stream } = await inspect(input.data, name, allow);
   const id = randomUUID();
   const path = `${input.area}/${input.workspaceId}/${id}`;
   const block = blobs.getBlockBlobClient(path);
+  afterRollback(db, blobCleanup(path, block));
   const hash = createHash('sha256');
   let size = 0;
   const meter = new Transform({
@@ -155,29 +199,24 @@ export async function storeFile(db: pg.PoolClient, blobs: ContainerClient, input
     },
   });
 
-  try {
-    await block.uploadStream(stream.pipe(meter), 4 * 1024 * 1024, 2, {
-      blobHTTPHeaders: { blobContentType: contentType },
-    });
-    const row = await insertRow(db, 'file', {
-      id,
-      workspace_id: input.workspaceId,
-      project_id: input.projectId ?? null,
-      task_id: input.taskId ?? null,
-      comment_id: input.commentId ?? null,
-      name,
-      content_type: contentType,
-      size_bytes: size,
-      sha256: hash.digest('hex'),
-      blob_container: input.area,
-      blob_name: path,
-      uploaded_by: input.uploadedBy,
-    });
-    return toApi(row);
-  } catch (error) {
-    await block.deleteIfExists({ deleteSnapshots: 'include' }).catch(() => undefined);
-    throw error;
-  }
+  await block.uploadStream(stream.pipe(meter), 4 * 1024 * 1024, 2, {
+    blobHTTPHeaders: { blobContentType: contentType },
+  });
+  const row = await insertRow(db, 'file', {
+    id,
+    workspace_id: input.workspaceId,
+    project_id: input.projectId ?? null,
+    task_id: input.taskId ?? null,
+    comment_id: input.commentId ?? null,
+    name,
+    content_type: contentType,
+    size_bytes: size,
+    sha256: hash.digest('hex'),
+    blob_container: input.area,
+    blob_name: path,
+    uploaded_by: input.uploadedBy,
+  });
+  return toApi(row);
 }
 
 export async function readFile(blobs: ContainerClient, file: Row): Promise<NodeJS.ReadableStream> {
@@ -186,10 +225,11 @@ export async function readFile(blobs: ContainerClient, file: Row): Promise<NodeJ
   return response.readableStreamBody;
 }
 
-/** Soft-deletes the database row and removes its Blob. Call inside the request transaction. */
+/** Soft-deletes the database row; tx removes its Blob only after COMMIT and durably retries failures. */
 export async function discardFile(db: pg.PoolClient, blobs: ContainerClient, file: Row): Promise<void> {
   const id = file.id;
   if (typeof id !== 'string' || !id) throw new Error('The file row has no id');
   await db.query(`update file set deleted_at = now(), version = version + 1 where id = $1 and deleted_at is null`, [id]);
-  await blobs.getBlockBlobClient(blobName(file)).deleteIfExists({ deleteSnapshots: 'include' });
+  const path = blobName(file);
+  afterCommit(db, blobCleanup(path, blobs.getBlockBlobClient(path)));
 }

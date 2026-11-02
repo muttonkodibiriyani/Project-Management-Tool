@@ -7,6 +7,7 @@ import { postgresSessions } from './auth/sessions.js';
 import { ConfigError, loadConfig, type Config } from './config.js';
 import { createContainer, createPool, databaseCheck, storageCheck } from './dependencies.js';
 import { expireIdempotencyKeys } from './api/rows.js';
+import { retryDeferredCleanups } from './db/tx.js';
 import { healthReporter } from './health.js';
 import { managedIdentity } from './managed-identity.js';
 
@@ -59,8 +60,19 @@ const expireKeys = () => {
     app.log.warn({ err: error }, 'old idempotency keys could not be removed; the next hourly run tries again');
   });
 };
+const cleanBlobs = () => {
+  retryDeferredCleanups(pool, 'blob', async key => {
+    const { rows } = await pool.query<{ deleted_at: Date | null }>('select deleted_at from file where blob_name = $1', [key]);
+    if (rows[0]?.deleted_at === null) return;
+    await blobs.getBlockBlobClient(key).deleteIfExists({ deleteSnapshots: 'include' });
+  }).catch((error: unknown) => {
+    app.log.warn({ err: error }, 'queued Blob cleanup could not finish; the next hourly run tries again');
+  });
+};
 expireKeys();
+cleanBlobs();
 setInterval(expireKeys, HOUR_MS).unref();
+setInterval(cleanBlobs, HOUR_MS).unref();
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
