@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import Fastify, { type LightMyRequestResponse } from 'fastify';
 import pg from 'pg';
-import type { AppRole } from '../auth/roles.js';
+import { APP_ROLES, type AppRole } from '../auth/roles.js';
 import { SESSION_COOKIE } from '../auth/plugin.js';
 import { apiFixture, USERS, WS, type UserName } from '../testing/api.js';
 import { skipWithoutDatabase } from '../testing/database.js';
@@ -11,6 +11,118 @@ import { api, RATE_LIMIT } from './plugin.js';
 
 const MEMBERS = (Object.keys(USERS) as UserName[]).filter(name => name !== 'outsider');
 const problem = (response: LightMyRequestResponse) => response.json<{ code: string; detail: string }>();
+const TEST_ID = '00000000-0000-4000-8000-000000000000';
+
+const ALL_ROLES: readonly AppRole[] = APP_ROLES;
+const EDITORS: readonly AppRole[] = APP_ROLES.filter(role => role !== 'Viewer');
+const MANAGERS: readonly AppRole[] = ['Workspace.Admin', 'Launch.Manager'];
+const ADMINS: readonly AppRole[] = ['Workspace.Admin'];
+
+/**
+ * The intended policy, written independently of each route's production config.access declaration.
+ * Both sides are exhaustive: a registered route missing here, or a stale row with no route, fails.
+ */
+const EXPECTED_ROUTE_ROLES = {
+  'DELETE /api/v1': ALL_ROLES,
+  'DELETE /api/v1/*': ALL_ROLES,
+  'DELETE /api/v1/me/favourites/:kind/:id': ALL_ROLES,
+  'DELETE /api/v1/me/sessions/:id': ALL_ROLES,
+  'DELETE /api/v1/w/:ws/comments/:id': EDITORS,
+  'DELETE /api/v1/w/:ws/comments/:id/reactions/:emoji': EDITORS,
+  'DELETE /api/v1/w/:ws/members/:userId': ADMINS,
+  'DELETE /api/v1/w/:ws/milestones/:id': MANAGERS,
+  'DELETE /api/v1/w/:ws/projects/:id': MANAGERS,
+  'DELETE /api/v1/w/:ws/subtasks/:id': EDITORS,
+  'DELETE /api/v1/w/:ws/tasks/:id': EDITORS,
+  'DELETE /api/v1/w/:ws/tasks/:id/dependencies/:otherId': EDITORS,
+  'DELETE /api/v1/w/:ws/teams/:id': ADMINS,
+  'DELETE /api/v1/w/:ws/teams/:id/members/:userId': ADMINS,
+  'DELETE /api/v1/w/:ws/views/:id': ALL_ROLES,
+  'GET /api/v1': ALL_ROLES,
+  'GET /api/v1/*': ALL_ROLES,
+  'GET /api/v1/me': ALL_ROLES,
+  'GET /api/v1/me/notifications': ALL_ROLES,
+  'GET /api/v1/me/sessions': ALL_ROLES,
+  'GET /api/v1/w/:ws': ALL_ROLES,
+  'GET /api/v1/w/:ws/activity': ALL_ROLES,
+  'GET /api/v1/w/:ws/bootstrap': ALL_ROLES,
+  'GET /api/v1/w/:ws/changes': ALL_ROLES,
+  'GET /api/v1/w/:ws/members': ALL_ROLES,
+  'GET /api/v1/w/:ws/projects': ALL_ROLES,
+  'GET /api/v1/w/:ws/projects/:id': ALL_ROLES,
+  'GET /api/v1/w/:ws/search': ALL_ROLES,
+  'GET /api/v1/w/:ws/tasks': ALL_ROLES,
+  'GET /api/v1/w/:ws/tasks/:id': ALL_ROLES,
+  'GET /api/v1/w/:ws/tasks/:id/comments': ALL_ROLES,
+  'GET /api/v1/w/:ws/tasks/:id/stores': ALL_ROLES,
+  'GET /api/v1/w/:ws/teams': ALL_ROLES,
+  'GET /api/v1/w/:ws/teams/:id': ALL_ROLES,
+  'GET /api/v1/w/:ws/views': ALL_ROLES,
+  'GET /api/v1/workspaces': ALL_ROLES,
+  'OPTIONS /api/v1': ALL_ROLES,
+  'OPTIONS /api/v1/*': ALL_ROLES,
+  'PATCH /api/v1': ALL_ROLES,
+  'PATCH /api/v1/*': ALL_ROLES,
+  'PATCH /api/v1/me': ALL_ROLES,
+  'PATCH /api/v1/me/notifications/:id': ALL_ROLES,
+  'PATCH /api/v1/w/:ws': ADMINS,
+  'PATCH /api/v1/w/:ws/comments/:id': EDITORS,
+  'PATCH /api/v1/w/:ws/members/:userId': ADMINS,
+  'PATCH /api/v1/w/:ws/milestones/:id': MANAGERS,
+  'PATCH /api/v1/w/:ws/projects/:id': EDITORS,
+  'PATCH /api/v1/w/:ws/subtasks/:id': EDITORS,
+  'PATCH /api/v1/w/:ws/tasks/:id': EDITORS,
+  'PATCH /api/v1/w/:ws/tasks/:id/stores/:storeId': EDITORS,
+  'PATCH /api/v1/w/:ws/teams/:id': ADMINS,
+  'PATCH /api/v1/w/:ws/views/:id': ALL_ROLES,
+  'POST /api/v1': ALL_ROLES,
+  'POST /api/v1/*': ALL_ROLES,
+  'POST /api/v1/me/notifications/read-all': ALL_ROLES,
+  'POST /api/v1/w/:ws/follow-ups': EDITORS,
+  'POST /api/v1/w/:ws/members': ADMINS,
+  'POST /api/v1/w/:ws/projects': EDITORS,
+  'POST /api/v1/w/:ws/projects/:id/milestones': MANAGERS,
+  'POST /api/v1/w/:ws/tasks': EDITORS,
+  'POST /api/v1/w/:ws/tasks/:id/comments': EDITORS,
+  'POST /api/v1/w/:ws/tasks/:id/duplicate': EDITORS,
+  'POST /api/v1/w/:ws/tasks/:id/follow-ups': EDITORS,
+  'POST /api/v1/w/:ws/tasks/:id/stores': MANAGERS,
+  'POST /api/v1/w/:ws/tasks/:id/subtasks': EDITORS,
+  'POST /api/v1/w/:ws/tasks/bulk': EDITORS,
+  'POST /api/v1/w/:ws/teams': ADMINS,
+  'POST /api/v1/w/:ws/views': ALL_ROLES,
+  'POST /api/v1/workspaces': ADMINS,
+  'PUT /api/v1': ALL_ROLES,
+  'PUT /api/v1/*': ALL_ROLES,
+  'PUT /api/v1/me/favourites/:kind/:id': ALL_ROLES,
+  'PUT /api/v1/w/:ws/comments/:id/reactions/:emoji': EDITORS,
+  'PUT /api/v1/w/:ws/projects/:id/members': MANAGERS,
+  'PUT /api/v1/w/:ws/projects/:id/references': MANAGERS,
+  'PUT /api/v1/w/:ws/projects/:id/stores': MANAGERS,
+  'PUT /api/v1/w/:ws/tasks/:id/dependencies/:otherId': EDITORS,
+  'PUT /api/v1/w/:ws/teams/:id/members/:userId': ADMINS,
+  'QUERY /api/v1': ALL_ROLES,
+  'QUERY /api/v1/*': ALL_ROLES,
+  'TRACE /api/v1': ALL_ROLES,
+  'TRACE /api/v1/*': ALL_ROLES,
+} as const satisfies Record<string, readonly AppRole[]>;
+
+type ExpectedRoute = keyof typeof EXPECTED_ROUTE_ROLES;
+
+function rolesDeclaredBy(access: 'any' | 'editor' | readonly AppRole[]): readonly AppRole[] {
+  if (access === 'any') return ALL_ROLES;
+  if (access === 'editor') return EDITORS;
+  return access;
+}
+
+function requestPath(url: string): string {
+  return url
+    .slice('/api/v1'.length)
+    .replace('/w/:ws', `/w/${WS}`)
+    .replace('/:emoji', '/wave')
+    .replace(/:[A-Za-z][A-Za-z0-9]*/g, TEST_ID)
+    .replace(/\/\*$/, '/no-such-route');
+}
 
 test('a route without a valid access list stops the API from starting', async () => {
   // These apps never query: a pool only connects on its first query.
@@ -77,6 +189,49 @@ test('the API, with real sessions in PostgreSQL', async t => {
     assert.equal(response.statusCode, 404);
     assert.equal(problem(response).code, 'not_found');
     assert.equal((await f.call('outsider', 'GET', '/me')).statusCode, 200);
+  });
+
+  await t.test('every registered route enforces its complete seven-role matrix', async () => {
+    const registered = f.routes.map(route => `${route.method} ${route.url}`).sort();
+    const expected = Object.keys(EXPECTED_ROUTE_ROLES).sort();
+    assert.deepEqual(registered, expected, 'the independent policy table must name every registered API route, once');
+    assert.ok(f.routes.length > 70, 'the matrix covers the real API, including both unknown-route handlers');
+    for (const route of f.routes) {
+      const key = `${route.method} ${route.url}` as ExpectedRoute;
+      const expectedRoles: readonly AppRole[] = EXPECTED_ROUTE_ROLES[key];
+      assert.deepEqual([...rolesDeclaredBy(route.access)].sort(), [...expectedRoles].sort(), `${key} must declare the independently expected access`);
+      for (const name of MEMBERS) {
+        const role = USERS[name];
+        const allowed = expectedRoles.includes(role);
+        const response = await f.call(name, route.method, requestPath(route.url));
+        assert.equal(
+          response.statusCode === 403,
+          !allowed,
+          `${role} ${route.method} ${route.url}: expected ${allowed ? 'the route to run' : 'the route guard to refuse'}`,
+        );
+        if (!allowed) assert.equal(problem(response).code, 'forbidden', `${role} ${route.method} ${route.url}`);
+      }
+    }
+  });
+
+  await t.test('team deletion remains admin-only under the independent policy', async () => {
+    const key: ExpectedRoute = 'DELETE /api/v1/w/:ws/teams/:id';
+    assert.deepEqual(EXPECTED_ROUTE_ROLES[key], ['Workspace.Admin']);
+    for (const name of MEMBERS.filter(name => name !== 'admin')) {
+      const response = await f.call(name, 'DELETE', `/w/${WS}/teams/${f.teams.commercial}`);
+      assert.equal(response.statusCode, 403, `${USERS[name]} cannot inherit broadened member access`);
+      assert.equal(problem(response).code, 'forbidden');
+    }
+  });
+
+  await t.test('every workspace-scoped route checks membership before its handler', async () => {
+    const workspaceRoutes = f.routes.filter(route => route.url.includes('/w/:ws'));
+    assert.ok(workspaceRoutes.length > 30, 'the isolation check covers every workspace resource group');
+    for (const route of workspaceRoutes) {
+      const response = await f.call('outsider', route.method, requestPath(route.url));
+      assert.equal(response.statusCode, 404, `${route.method} ${route.url}`);
+      assert.equal(problem(response).code, 'not_found', `${route.method} ${route.url}`);
+    }
   });
 
   await t.test('every role is checked on the server, and a refused write never reaches the database', async () => {

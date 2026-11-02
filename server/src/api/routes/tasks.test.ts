@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { apiFixture, ifMatch, TASK_ROUTES, WS } from '../../testing/api.js';
+import { apiFixture, ifMatch, TASK_ROUTES, USERS, WS, type UserName } from '../../testing/api.js';
 import { skipWithoutDatabase } from '../../testing/database.js';
 
 interface Task {
@@ -26,6 +26,7 @@ interface Problem {
   current?: Task;
 }
 const W = `/w/${WS}`;
+const ROLE_USERS = ['admin', 'manager', 'brand', 'supply', 'vm', 'comms', 'viewer'] as const satisfies readonly UserName[];
 
 test('tasks, launch lines, follow-ups, subtasks and dependencies', async t => {
   if (skipWithoutDatabase(t)) return;
@@ -131,8 +132,20 @@ test('tasks, launch lines, follow-ups, subtasks and dependencies', async t => {
     const vm = await f.call('vm', 'PATCH', `${W}/tasks/${line.id}`, { body: { values: { supply_ready: false } }, headers: ifMatch(current) });
     assert.match(vm.json<Problem>().detail, /values\.supply_ready/);
 
+    const gateEditors = new Set<UserName>(['admin', 'manager', 'supply']);
+    for (const [index, name] of ROLE_USERS.entries()) {
+      const response = await f.call(name, 'PATCH', `${W}/tasks/${line.id}`, {
+        body: { values: { supply_ready: index % 2 === 0 } },
+        headers: ifMatch(current),
+      });
+      const allowed = gateEditors.has(name);
+      assert.equal(response.statusCode, allowed ? 200 : 403, `${USERS[name]} edits the Supply gate`);
+      if (allowed) current = response;
+      else assert.equal(response.json<Problem>().code, name === 'viewer' ? 'forbidden' : 'field_forbidden', USERS[name]);
+    }
+
     const merged = await f.call('manager', 'PATCH', `${W}/tasks/${line.id}`, { body: { values: { zone: null } }, headers: ifMatch(current) });
-    assert.deepEqual(merged.json<Task>().values, { channel: 'retail', supply_ready: true });
+    assert.deepEqual(merged.json<Task>().values, { channel: 'retail', supply_ready: false });
 
     const activity = (await f.call('viewer', 'GET', `${W}/activity?taskId=${line.id}`)).json<{
       items: { verb: string; changes: { field: string; from: unknown; to: unknown }[] }[];
@@ -140,7 +153,7 @@ test('tasks, launch lines, follow-ups, subtasks and dependencies', async t => {
     assert.deepEqual(activity.items[0]?.changes, [{ field: 'values.zone', from: 'A1', to: null }]);
     assert.deepEqual(
       activity.items.map(entry => entry.verb),
-      ['updated', 'updated', 'updated', 'created'],
+      ['updated', 'updated', 'updated', 'updated', 'updated', 'updated', 'created'],
     );
   });
 
@@ -307,12 +320,18 @@ test('tasks, launch lines, follow-ups, subtasks and dependencies', async t => {
   await t.test('line × store answers: gates per store by their owner team, new store rows by managers', async () => {
     const stores = await f.call('vm', 'GET', `${W}/tasks/${line.id}/stores`);
     const dfc = stores.json<{ items: { storeId: string; version: number }[] }>().items.find(row => row.storeId === f.stores.DFC);
-    const headers = { 'if-match': `"${String(dfc?.version)}"` };
-    const bySupply = await f.call('supply', 'PATCH', `${W}/tasks/${line.id}/stores/${f.stores.DFC}`, { body: { values: { vm_dressed: true } }, headers });
-    assert.equal(bySupply.json<Problem>().code, 'field_forbidden');
-    const byVm = await f.call('vm', 'PATCH', `${W}/tasks/${line.id}/stores/${f.stores.DFC}`, { body: { values: { vm_dressed: true } }, headers });
-    assert.equal(byVm.statusCode, 200);
-    assert.deepEqual(byVm.json<{ values: unknown }>().values, { vm_dressed: true });
+    let headers = { 'if-match': `"${String(dfc?.version)}"` };
+    const gateEditors = new Set<UserName>(['admin', 'manager', 'vm']);
+    for (const [index, name] of ROLE_USERS.entries()) {
+      const response = await f.call(name, 'PATCH', `${W}/tasks/${line.id}/stores/${f.stores.DFC}`, {
+        body: { values: { vm_dressed: index % 2 === 0 } },
+        headers,
+      });
+      const allowed = gateEditors.has(name);
+      assert.equal(response.statusCode, allowed ? 200 : 403, `${USERS[name]} edits the VM gate`);
+      if (allowed) headers = ifMatch(response);
+      else assert.equal(response.json<Problem>().code, name === 'viewer' ? 'forbidden' : 'field_forbidden', USERS[name]);
+    }
 
     const { rows } = await f.db.query<{ id: string }>(
       `insert into store (workspace_id, code, name, market_code) values ($1, 'AVE', 'AVE', 'QAT') returning id`,
