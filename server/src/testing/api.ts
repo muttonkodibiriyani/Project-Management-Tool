@@ -14,6 +14,7 @@ import { hashToken } from '../auth/sessions.js';
 import { migrate } from '../db/migrate.js';
 import { APP_ROLE_PASSWORD, emptyDatabase, TEST_DATABASE_URL } from './database.js';
 import { devAuth } from './sessions.js';
+import { unusedBlobs } from './blobs.js';
 
 /** One synthetic user per Entra app role, plus a Launch.Manager who is in no workspace. */
 export const USERS = {
@@ -142,6 +143,7 @@ export async function apiFixture(t: TestContext): Promise<Fixture> {
   const app = buildApp({
     publicDir: mkdtempSync(join(tmpdir(), 'lt-public-')),
     pool,
+    blobs: unusedBlobs,
     health: () => Promise.resolve({ status: 'ok', commit: '', imageDigest: '', checks: [] }),
     auth: devAuth(),
   });

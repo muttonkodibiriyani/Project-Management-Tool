@@ -29,7 +29,8 @@ if (!existsSync(join(config.publicDir, 'index.html'))) {
 const pool = createPool(config.database, error => {
   app.log.warn({ err: error }, 'an idle PostgreSQL connection closed; the next query reconnects');
 });
-const health = healthReporter([databaseCheck(pool, config.database), storageCheck(createContainer(config.storage), config.storage)], {
+const blobs = createContainer(config.storage);
+const health = healthReporter([databaseCheck(pool, config.database), storageCheck(blobs, config.storage)], {
   commit: config.commit,
   imageDigest: config.imageDigest,
 });
@@ -50,7 +51,7 @@ const auth: AuthOptions =
         }),
       }
     : { mode: 'dev', sessions, signingKey: authConfig.signingKey };
-const app = buildApp({ publicDir: config.publicDir, health, pool, auth, logger: true, proxyHops: config.proxyHops });
+const app = buildApp({ publicDir: config.publicDir, health, pool, blobs, auth, logger: true, proxyHops: config.proxyHops });
 
 const HOUR_MS = 3_600_000;
 const expireKeys = () => {

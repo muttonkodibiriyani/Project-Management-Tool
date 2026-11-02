@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { ContainerClient } from '@azure/storage-blob';
 import fastifyStatic from '@fastify/static';
 import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import type pg from 'pg';
@@ -40,13 +41,14 @@ export interface AppOptions {
   publicDir: string;
   health: () => Promise<HealthReport>;
   pool: pg.Pool;
+  blobs: ContainerClient;
   auth: AuthOptions;
   logger?: FastifyServerOptions['logger'];
   /** Trusted proxy hops for request.ip (Config.proxyHops); 0 ignores X-Forwarded-For. */
   proxyHops?: number;
 }
 
-export function buildApp({ publicDir, health, pool, auth, logger = false, proxyHops = 0 }: AppOptions): FastifyInstance {
+export function buildApp({ publicDir, health, pool, blobs, auth, logger = false, proxyHops = 0 }: AppOptions): FastifyInstance {
   const app = Fastify({
     logger,
     trustProxy: (_address: string, hop: number) => hop < proxyHops,
@@ -86,7 +88,7 @@ export function buildApp({ publicDir, health, pool, auth, logger = false, proxyH
     return reply.code(report.status === 'ok' ? 200 : 503).send(publicHealth(report));
   });
 
-  void app.register(api, { prefix: '/api/v1', pool });
+  void app.register(api, { prefix: '/api/v1', pool, blobs });
   void app.register(fastifyStatic, { root: publicDir, cacheControl: false });
 
   return app;

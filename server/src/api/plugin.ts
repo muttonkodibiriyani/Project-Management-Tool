@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { ContainerClient } from '@azure/storage-blob';
 import fastifyCookie from '@fastify/cookie';
 import fastifyRateLimit from '@fastify/rate-limit';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -11,6 +12,7 @@ import { routes } from './routes/index.js';
 
 export interface ApiOptions {
   pool: pg.Pool;
+  blobs: ContainerClient;
 }
 
 const CSRF_VALUE = 'launch-tracker';
@@ -93,7 +95,7 @@ function sendProblem(reply: FastifyReply, request: FastifyRequest, problem: ApiE
  * Everything under /api/v1. Fails closed: a route without a valid `config.access` stops the server at startup,
  * every request needs a session, and every non-GET request needs the CSRF header.
  */
-export async function api(app: FastifyInstance, { pool }: ApiOptions) {
+export async function api(app: FastifyInstance, { pool, blobs }: ApiOptions) {
   await app.register(fastifyCookie);
   // Counted before the session is looked up, so a flood never reaches the database.
   await app.register(fastifyRateLimit, {
@@ -144,5 +146,5 @@ export async function api(app: FastifyInstance, { pool }: ApiOptions) {
   app.all('/', unknown, answerUnknown);
   app.all('/*', unknown, answerUnknown);
 
-  await app.register(routes, { pool });
+  await app.register(routes, { pool, blobs });
 }
