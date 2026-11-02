@@ -18,7 +18,9 @@ test('sign-in, 401 and sign-out use only the server-owned auth flow', async () =
         unauthorized({ problem: { status: 401 }, returnTo: '/w/qatar?tab=launches#next' });
         throw Object.assign(new Error('Signed out'), { status: 401 });
       }
-      return { data: { entraLogoutUrl: 'https://login.microsoftonline.test/logout' }, etag: null, location: null };
+      if (requestMode === 'missing-data') return { data: null, etag: null, location: null };
+      if (requestMode !== 'success') return { data: { logoutUrl: requestMode }, etag: null, location: null };
+      return { data: { logoutUrl: 'https://login.microsoftonline.test/logout' }, etag: null, location: null };
     },
   });
 
@@ -39,4 +41,11 @@ test('sign-in, 401 and sign-out use only the server-owned auth flow', async () =
     ['request', '/auth/logout', { method: 'POST' }],
     ['navigate', '/auth/login?returnTo=%2Fw%2Fqatar%3Ftab%3Dlaunches%23next'],
   ]);
+
+  for (const malformed of ['missing-data', null, '', '   ', 42]) {
+    events.length = 0;
+    requestMode = malformed;
+    await assert.rejects(signOut(), /did not include a logout URL/);
+    assert.deepEqual(events, [['clear'], ['request', '/auth/logout', { method: 'POST' }]]);
+  }
 });

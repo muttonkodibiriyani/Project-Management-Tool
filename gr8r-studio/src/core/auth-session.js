@@ -23,6 +23,6 @@ export async function signOut() {
   if (!apiRequest || !clearCache) throw new Error('The authentication session has not been installed.');
   await clearCache();
   const { data } = await apiRequest('/auth/logout', { method: 'POST' });
-  if (!data || typeof data.entraLogoutUrl !== 'string') throw new Error('The sign-out response did not include the Entra logout URL.');
-  navigate(data.entraLogoutUrl);
+  if (!data || typeof data.logoutUrl !== 'string' || !data.logoutUrl.trim()) throw new Error('The sign-out response did not include a logout URL.');
+  navigate(data.logoutUrl);
 }
