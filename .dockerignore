@@ -4,5 +4,8 @@
 !NOTICE
 !gr8r-studio/
 !server/
+!templates/
+!templates/launch-workbook/
+!templates/launch-workbook/launch-workbook-template.xlsx
 **/node_modules
 **/dist
