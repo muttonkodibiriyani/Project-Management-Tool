@@ -357,48 +357,29 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
     const workspace = workspaceOf(request);
     const importId = randomUUID();
     const sheets = sheetSummary(workbook);
-    let stored: Row | undefined;
-    try {
-      const row = await tx(pool, async client => {
-        stored = await storeFile(client, options.blobs, {
-          workspaceId: workspace.id,
-          uploadedBy: callerOf(request).userId,
-          name: part.filename,
-          data: Readable.from(bytes),
-          area: 'imports',
-          allow: ['xlsx'],
-        });
-        const fileId = String(stored.id);
-        const inserted = await client.query<JobRow>('insert into import_job (id,workspace_id,file_id,created_by) values ($1,$2,$3,$4) returning *', [
-          importId,
-          workspace.id,
-          fileId,
-          callerOf(request).userId,
-        ]);
-        return { ...(inserted.rows[0] ?? {}), file_name: String(stored.name), blob_name: String(stored.blobName) } as JobRow;
+    const row = await tx(pool, async client => {
+      const stored = await storeFile(client, options.blobs, {
+        workspaceId: workspace.id,
+        uploadedBy: callerOf(request).userId,
+        name: part.filename,
+        data: Readable.from(bytes),
+        area: 'imports',
+        allow: ['xlsx'],
       });
-      return await reply
-        .code(201)
-        .header('location', `/api/v1/w/${workspace.slug}/imports/${importId}`)
-        .header('etag', `"${String(row.version)}"`)
-        .send(publicJob(row, sheets));
-    } catch (error) {
-      let cleanupFailure: unknown;
-      if (stored) {
-        const cleanup = await pool.connect();
-        try {
-          await discardFile(cleanup, options.blobs, stored);
-        } catch (failed) {
-          cleanupFailure = failed;
-        } finally {
-          cleanup.release();
-        }
-      }
-      if (cleanupFailure) {
-        throw new AggregateError([error, cleanupFailure], 'The import transaction and its Blob cleanup both failed.');
-      }
-      throw error;
-    }
+      const fileId = String(stored.id);
+      const inserted = await client.query<JobRow>('insert into import_job (id,workspace_id,file_id,created_by) values ($1,$2,$3,$4) returning *', [
+        importId,
+        workspace.id,
+        fileId,
+        callerOf(request).userId,
+      ]);
+      return { ...(inserted.rows[0] ?? {}), file_name: String(stored.name), blob_name: String(stored.blobName) } as JobRow;
+    });
+    return await reply
+      .code(201)
+      .header('location', `/api/v1/w/${workspace.slug}/imports/${importId}`)
+      .header('etag', `"${String(row.version)}"`)
+      .send(publicJob(row, sheets));
   });
 
   app.get('/imports/:id', { config: { access: MANAGERS }, schema: { params: JobParams } }, async (request, reply) => {
