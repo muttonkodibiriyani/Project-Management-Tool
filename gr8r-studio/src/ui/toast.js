@@ -25,11 +25,10 @@ export function toast(msg, opt = {}) {
   host.appendChild(el);
   setTimeout(kill, opt.ms || 4200);
 }
-/* guarded mutation: simulates offline failures for the "Failed to save" state */
+/* Offline mutations stay usable: store.save queues the newest snapshot for reconnect. */
 export function mutate(fn, label) {
   if (S.ui.offline) {
-    toast("Your changes couldn't be saved. You're offline.", { kind: 'err', action: 'Try again', onAction: () => mutate(fn, label) });
-    return false;
+    toast(`${label || 'Your change'} is saved offline and will sync when the connection returns.`, { kind: 'info' });
   }
   fn();
   save();

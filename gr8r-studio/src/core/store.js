@@ -35,7 +35,34 @@ export const DEFAULT_PREFS = {
   name: 'Tanjim Islam',
   title: 'Head of Product',
 };
+const DEV = Boolean(import.meta.env?.DEV);
+
+export function emptyData() {
+  return {
+    ws: { id: '', name: 'Launch Tracker', url: '', c: '#1D1C1A', brand: false },
+    workspaces: [],
+    me: '',
+    members: [],
+    teams: [],
+    projects: [],
+    tasks: [],
+    comments: [],
+    activity: [],
+    notifs: [],
+    files: [],
+    events: [],
+    projOrder: [],
+    savedViews: [],
+    recentSearches: [],
+    sessions: [],
+    invoices: [],
+    notifPrefs: {},
+  };
+}
+
+/** Legacy seed persistence exists only for Vite's explicit local-development mode. */
 export function load() {
+  if (!DEV) return null;
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) {
@@ -49,9 +76,9 @@ export function load() {
 }
 export const saved = load();
 export const S = {
-  data: saved?.data || seed(),
+  data: saved?.data || (DEV ? seed() : emptyData()),
   // Restricted endpoint responses live only in memory and are never stored with bootstrap.
-  authorized: { launchDirectory: syntheticLaunchDirectory() },
+  authorized: { launchDirectory: DEV ? syntheticLaunchDirectory() : null },
   prefs: Object.assign({}, DEFAULT_PREFS, saved?.prefs || {}),
   views: saved?.views || {},
   ui: {
@@ -100,10 +127,26 @@ export const S = {
     drafts: {},
   },
 };
+let syncHandler = null;
+
+/** Install the API synchroniser without coupling store mutations to transport details. */
+export function registerSync(handler) {
+  if (handler !== null && typeof handler !== 'function') throw new TypeError('The store sync handler must be a function or null.');
+  syncHandler = handler;
+}
+
+/** Replace the visible workspace after an authenticated cache or API read. */
+export function replaceStoreData(data, prefs) {
+  S.data = data;
+  if (prefs) S.prefs = Object.assign({}, DEFAULT_PREFS, prefs);
+}
+
 export let _saveT;
 export function save() {
+  syncHandler?.({ data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed });
   clearTimeout(_saveT);
   _saveT = setTimeout(() => {
+    if (!DEV) return;
     try {
       localStorage.setItem(STORE_KEY, JSON.stringify({ data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed }));
     } catch {
