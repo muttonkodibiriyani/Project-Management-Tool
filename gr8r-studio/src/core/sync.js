@@ -172,6 +172,18 @@ export function toLegacyData(base, profile, directory = null, sessions = []) {
 export function applyChanges(base, items) {
   const next = json(base);
   for (const item of items) {
+    if (item.kind === 'lineStore' || item.kind === 'subtask') {
+      const property = item.kind === 'lineStore' ? 'lineStores' : 'subtasks';
+      for (const task of next.tasks || []) {
+        const rows = Array.isArray(task[property]) ? task[property] : [];
+        task[property] = rows.filter(row => String(row.id) !== String(item.id));
+      }
+      if (!item.deleted && item.data) {
+        const task = (next.tasks || []).find(row => String(row.id) === String(item.data.taskId));
+        if (task) task[property].push(item.data);
+      }
+      continue;
+    }
     const list = RESOURCE_LIST[item.kind];
     if (!list) continue;
     if (list === 'workspace') {
@@ -270,6 +282,11 @@ function taskBody(task, create, resolve) {
 /** Produce ordered writes from the visible legacy state. Exported for deterministic contract tests. */
 export function buildMutations(before, after, prefsBefore = {}, prefsAfter = {}) {
   const operations = [];
+  const atomicFollowUps = new Set(
+    (after?.tasks || [])
+      .filter(task => task.kind === 'follow_up' && (task.followsUpId || task.followUpOf?.task) && !(before?.tasks || []).some(row => row.id === task.id))
+      .map(task => String(task.id)),
+  );
   const collections = [
     ['project', 'projects'],
     ['task', 'tasks'],
@@ -280,8 +297,12 @@ export function buildMutations(before, after, prefsBefore = {}, prefsAfter = {})
   for (const [resource, key] of collections) {
     const oldRows = indexById(before?.[key]);
     const newRows = indexById(after?.[key]);
-    for (const row of newRows.values())
-      operations.push({ resource, action: oldRows.has(String(row.id)) ? 'update' : 'create', before: oldRows.get(String(row.id)), row });
+    for (const row of newRows.values()) {
+      const old = oldRows.get(String(row.id));
+      if (!old && resource === 'task' && atomicFollowUps.has(String(row.id))) operations.push({ resource: 'followUp', action: 'create', row });
+      else if (!old && resource === 'comment' && atomicFollowUps.has(String(row.followUpTaskId))) continue;
+      else if (!old || !same(old, row)) operations.push({ resource, action: old ? 'update' : 'create', before: old, row });
+    }
     for (const row of oldRows.values()) if (!newRows.has(String(row.id))) operations.push({ resource, action: 'delete', before: row, row });
   }
   for (const resource of ['project', 'task']) {
@@ -329,7 +350,20 @@ export function buildMutations(before, after, prefsBefore = {}, prefsAfter = {})
     if (old && (old.read !== row.read || old.archived !== row.archived)) operations.push({ resource: 'notification', action: 'update', before: old, row });
   }
   if (!same(prefsBefore, prefsAfter)) operations.push({ resource: 'prefs', action: 'update', before: prefsBefore, row: prefsAfter });
-  const rank = { project: 1, task: 2, subtask: 3, dependency: 3, comment: 3, reaction: 4, event: 3, view: 3, favourite: 4, notification: 4, prefs: 4 };
+  const rank = {
+    project: 1,
+    task: 2,
+    followUp: 2,
+    subtask: 3,
+    dependency: 3,
+    comment: 3,
+    reaction: 4,
+    event: 3,
+    view: 3,
+    favourite: 4,
+    notification: 4,
+    prefs: 4,
+  };
   return operations.sort(
     (a, b) => (a.action === 'delete' ? 20 - rank[a.resource] : rank[a.resource]) - (b.action === 'delete' ? 20 - rank[b.resource] : rank[b.resource]),
   );
@@ -361,7 +395,12 @@ export function createSync({
   let flushing = false;
   let stopped = false;
   const idMap = new Map();
-  const resolve = id => idMap.get(String(id)) || id;
+  const resolve = id => idMap.get(String(id)) || state?.idMap?.[String(id)] || id;
+  const remember = (local, remote) => {
+    idMap.set(String(local), remote);
+    state.idMap ||= {};
+    state.idMap[String(local)] = remote;
+  };
 
   const persist = () => {
     if (!state || !key) return;
@@ -378,21 +417,22 @@ export function createSync({
   };
 
   async function loadRestricted() {
-    const [found, active] = await Promise.all([
-      request(workspacePath(workspace.slug, '/directory')),
-      request('/api/v1/me/sessions').catch(() => ({ data: { items: [] } })),
-    ]);
+    const sessionsRequest = request('/api/v1/me/sessions').catch(error => {
+      if (error?.status === 401) throw error;
+      return { data: { items: [] } };
+    });
+    const [found, active] = await Promise.all([request(workspacePath(workspace.slug, '/directory')), sessionsRequest]);
     directory = found.data;
     sessions = active.data?.items || [];
   }
 
-  async function bootstrap() {
+  async function bootstrap({ publishData = true } = {}) {
     const response = await request(workspacePath(workspace.slug, '/bootstrap'));
     state.base = response.data;
     state.changeSeq = response.data.changeSeq;
     await loadRestricted();
     persist();
-    publish();
+    if (publishData) publish();
   }
 
   async function pull() {
@@ -404,9 +444,10 @@ export function createSync({
       state.changeSeq = response.data.nextSince;
       more = Boolean(response.data.hasMore);
     }
-    await loadRestricted();
-    persist();
-    if (state.outbox.length === 0) publish();
+    // The feed is intentionally visibility-filtered and cannot emit a tombstone when a
+    // caller loses access to a private resource. Re-bootstrap before publishing so every
+    // render is based on a current authorization snapshot rather than stale cache rows.
+    await bootstrap({ publishData: state.outbox.length === 0 });
   }
 
   async function call(operation) {
@@ -416,7 +457,7 @@ export function createSync({
     if (operation.resource === 'project') {
       if (operation.action === 'create') {
         const result = await request(path('/projects'), { ...options, method: 'POST', body: projectBody(operation.row, true) });
-        idMap.set(String(operation.row.id), result.data.id);
+        remember(operation.row.id, result.data.id);
       } else if (operation.action === 'delete') await request(path(`/projects/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
       else {
         const body = changed(projectBody(operation.before, false), projectBody(operation.row, false), Object.keys(projectBody(operation.row, false)));
@@ -427,7 +468,7 @@ export function createSync({
     if (operation.resource === 'task') {
       if (operation.action === 'create') {
         const result = await request(path('/tasks'), { ...options, method: 'POST', body: taskBody(operation.row, true, resolve) });
-        idMap.set(String(operation.row.id), result.data.id);
+        remember(operation.row.id, result.data.id);
       } else if (operation.action === 'delete') await request(path(`/tasks/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
       else {
         const body = changed(
@@ -439,6 +480,23 @@ export function createSync({
       }
       return;
     }
+    if (operation.resource === 'followUp') {
+      const parentId = resolve(operation.row.followsUpId || operation.row.followUpOf?.task);
+      const result = await request(path(`/tasks/${parentId}/follow-ups`), {
+        ...options,
+        method: 'POST',
+        body: {
+          title: operation.row.title,
+          gate: operation.row.followsUpGate ?? operation.row.followUpOf?.gate ?? null,
+          storeId: operation.row.followsUpStoreId ?? operation.row.followUpOf?.storeId ?? null,
+          assigneeId: operation.row.assignee ?? operation.row.assigneeId ?? null,
+          dueDate: operation.row.due ?? operation.row.dueDate ?? null,
+          note: operation.row.desc ?? operation.row.description ?? null,
+        },
+      });
+      remember(operation.row.id, result.data.id);
+      return;
+    }
     if (operation.resource === 'comment') {
       if (operation.action === 'create') {
         const result = await request(path(`/tasks/${resolve(operation.row.task)}/comments`), {
@@ -446,7 +504,7 @@ export function createSync({
           method: 'POST',
           body: { body: operation.row.text, mentionIds: operation.row.mentionIds || [] },
         });
-        idMap.set(String(operation.row.id), result.data.id);
+        remember(operation.row.id, result.data.id);
       } else if (operation.action === 'delete') await request(path(`/comments/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
       else if (operation.before.text !== operation.row.text)
         await request(path(`/comments/${id}`), { method: 'PATCH', etag: versionOf(operation.before), body: { body: operation.row.text } });
@@ -460,7 +518,7 @@ export function createSync({
           method: 'POST',
           body: { title: operation.row.title, position: operation.row.position ?? 0 },
         });
-        idMap.set(String(operation.row.id), result.data.id);
+        remember(operation.row.id, result.data.id);
       } else if (operation.action === 'delete') {
         await request(path(`/subtasks/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
       } else {
@@ -490,7 +548,7 @@ export function createSync({
       };
       if (operation.action === 'create') {
         const result = await request(path('/events'), { ...options, method: 'POST', body });
-        idMap.set(String(operation.row.id), result.data.id);
+        remember(operation.row.id, result.data.id);
       } else if (operation.action === 'delete') await request(path(`/events/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
       else {
         const old = {
@@ -514,7 +572,7 @@ export function createSync({
       };
       if (operation.action === 'create') {
         const result = await request(path('/views'), { ...options, method: 'POST', body });
-        idMap.set(String(operation.row.id), result.data.id);
+        remember(operation.row.id, result.data.id);
       } else if (operation.action === 'delete') await request(path(`/views/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
       else {
         const old = {
@@ -546,6 +604,12 @@ export function createSync({
     }
   }
 
+  const operationKey = operation =>
+    [operation.resource, operation.action, operation.row?.id, operation.kind, operation.dependency, operation.emoji]
+      .filter(value => value !== undefined && value !== null)
+      .map(String)
+      .join(':');
+
   async function flush() {
     if (flushing || stopped || !state?.outbox.length) return;
     flushing = true;
@@ -553,18 +617,35 @@ export function createSync({
     try {
       while (state.outbox.length) {
         const pending = state.outbox[0];
+        if (pending.revalidate) {
+          await bootstrap({ publishData: false });
+          pending.revalidate = false;
+          persist();
+        }
         const before = toLegacyData(state.base, profile, null, sessions);
         const operations = buildMutations(before, pending.snapshot, profile.prefs, pending.prefs);
-        for (const operation of operations) await call(operation);
+        const completed = new Set(pending.completed || []);
+        for (const operation of operations) {
+          const operationId = operationKey(operation);
+          if (completed.has(operationId)) continue;
+          await call(operation);
+          completed.add(operationId);
+          pending.completed = [...completed];
+          persist();
+        }
         const index = state.outbox.findIndex(item => item.id === pending.id);
         if (index >= 0) state.outbox.splice(index, 1);
         profile.prefs = pending.prefs;
-        await bootstrap();
+        persist();
+        await bootstrap({ publishData: state.outbox.length === 0 });
       }
       onStatus({ offline: false, syncing: false });
     } catch (error) {
       if (error?.status === 409) onConflict(error);
-      else onStatus({ offline: true, syncing: false, error });
+      else {
+        if (state?.outbox[0] && (!error?.status || error.status >= 500)) state.outbox[0].revalidate = true;
+        onStatus({ offline: true, syncing: false, error });
+      }
       persist();
     } finally {
       flushing = false;
@@ -573,7 +654,7 @@ export function createSync({
 
   function queueSnapshot({ data, prefs }) {
     if (!state) return;
-    const pending = { id: `${Date.now()}-${Math.random()}`, snapshot: withoutRestricted(data), prefs: json(prefs) };
+    const pending = { id: `${Date.now()}-${Math.random()}`, snapshot: withoutRestricted(data), prefs: json(prefs), completed: [] };
     state.outbox = flushing && state.outbox.length ? [state.outbox[0], pending] : [pending];
     persist();
     queueMicrotask(() => void flush());
@@ -581,7 +662,12 @@ export function createSync({
 
   async function start(preferredWorkspace) {
     stopped = false;
-    profile = (await request('/api/v1/me')).data;
+    try {
+      profile = (await request('/api/v1/me')).data;
+    } catch (error) {
+      if (error?.status === 401) clearCaches(storage);
+      throw error;
+    }
     const pointer = parse(storage, CACHE_POINTER_KEY);
     if (pointer && pointer.userId !== profile.user.id) clearCaches(storage);
     workspace =
@@ -592,17 +678,19 @@ export function createSync({
     key = cacheKey(profile, workspace);
     state = parse(storage, key);
     if (!state || state.userId !== profile.user.id || state.workspaceId !== workspace.id) {
-      state = { userId: profile.user.id, workspaceId: workspace.id, workspaceSlug: workspace.slug, changeSeq: 0, base: null, outbox: [] };
+      state = { userId: profile.user.id, workspaceId: workspace.id, workspaceSlug: workspace.slug, changeSeq: 0, base: null, outbox: [], idMap: {} };
     }
-    write(storage, CACHE_POINTER_KEY, { key, userId: profile.user.id, workspaceId: workspace.id, workspaceSlug: workspace.slug });
-    if (state.base) {
-      publish();
-      try {
-        await pull();
-      } catch (error) {
-        onStatus({ offline: true, syncing: false, error });
-      }
-    } else await bootstrap();
+    state.outbox ||= [];
+    state.idMap ||= {};
+    try {
+      // Cached rows are never rendered until the server has revalidated both identity and
+      // current resource visibility. Offline or unauthorized boots therefore stay empty.
+      await bootstrap();
+      write(storage, CACHE_POINTER_KEY, { key, userId: profile.user.id, workspaceId: workspace.id, workspaceSlug: workspace.slug });
+    } catch (error) {
+      if (error?.status === 401) clearCaches(storage);
+      throw error;
+    }
     await flush();
     const refresh = () =>
       void pull()
