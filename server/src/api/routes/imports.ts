@@ -318,6 +318,15 @@ function scrubExport(data: Awaited<ReturnType<typeof loadExportData>>, request: 
   if (!seesContacts(workspace.settings, workspace.actor)) for (const row of data.distribution) row['Contacts as written'] = null;
 }
 
+function csvHeaders(scope: CsvScope, request: FastifyRequest): readonly string[] {
+  if (scope !== 'distribution') return CSV_SCOPES[scope];
+  const workspace = workspaceOf(request);
+  const hidden = new Set<string>();
+  if (!seesMargins(workspace.settings, workspace.actor)) for (const field of ['Margin', 'Extra margin', 'Margin terms', 'Margin as written']) hidden.add(field);
+  if (!seesContacts(workspace.settings, workspace.actor)) hidden.add('Contacts as written');
+  return CSV_SCOPES.distribution.filter(field => !hidden.has(field));
+}
+
 export function imports(plain: FastifyInstance, options: ApiOptions, done: () => void) {
   const { pool } = options;
   const app = plain.withTypeProvider<TypeBoxTypeProvider>();
@@ -621,7 +630,7 @@ export function imports(plain: FastifyInstance, options: ApiOptions, done: () =>
         type = XLSX;
       } else {
         const scope: CsvScope = request.query.scope ?? 'lines';
-        bytes = toCsv(CSV_SCOPES[scope], data[scope]);
+        bytes = toCsv(csvHeaders(scope, request), data[scope]);
         name = `${data.launch}-${scope}.csv`;
         type = CSV;
       }
