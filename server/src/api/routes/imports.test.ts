@@ -175,11 +175,17 @@ test('authenticated import routes preview reviews, commit both layouts, re-impor
     create trigger reject_synthetic_import before insert on import_job for each row execute function reject_synthetic_import();
   `);
   const blobsBeforeRollback = memory.objects.size;
+  const intentsBeforeRollback = Number((await f.db.query<{ count: string }>('select count(*) as count from deferred_cleanup')).rows[0]?.count ?? '0');
   const rollbackForm = multipart(launchTracker(), 'rollback.xlsx');
   const rolledBack = await f.call('manager', 'POST', `${W}/imports`, { body: rollbackForm.body, headers: rollbackForm.headers });
   assert.equal(rolledBack.statusCode, 500);
   assert.equal(memory.objects.size, blobsBeforeRollback, 'a failed outer transaction compensates the uploaded Blob');
   assert.equal(Number((await f.db.query<{ count: string }>(`select count(*) as count from file where name='rollback.xlsx'`)).rows[0]?.count ?? '0'), 0);
+  assert.equal(
+    Number((await f.db.query<{ count: string }>('select count(*) as count from deferred_cleanup')).rows[0]?.count ?? '0'),
+    intentsBeforeRollback,
+    'successful rollback cleanup finalises the durable intent',
+  );
   await f.db.query('drop trigger reject_synthetic_import on import_job; drop function reject_synthetic_import()');
 
   const first = await configure(f, launchTracker(), projectId, 'launch_tracker', 'LAUNCH TRACKER');
