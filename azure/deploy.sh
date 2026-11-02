@@ -27,34 +27,38 @@ fail() {
 }
 usage() { sed -n '2,11s/^# \{0,1\}//p' "$0"; }
 
-command=${1:-}
-[ $# -gt 0 ] && shift
+command=""
 image=""
 values="$HERE/landing-zone.env"
 target=""
 assume_yes=0
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --image | --values | --to)
-      [ $# -ge 2 ] || fail "$1 needs a value. Run with --help to see the options."
-      case "$1" in --image) image=$2 ;; --values) values=$2 ;; --to) target=$2 ;; esac
-      shift 2
-      ;;
-    --yes) assume_yes=1 && shift ;;
-    -h | --help) usage && exit 0 ;;
-    *) fail "unknown option $1. Run with --help to see the options." ;;
+work=""
+if [ "${DEPLOY_SH_LIBRARY_ONLY:-0}" != 1 ]; then
+  command=${1:-}
+  [ $# -gt 0 ] && shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --image | --values | --to)
+        [ $# -ge 2 ] || fail "$1 needs a value. Run with --help to see the options."
+        case "$1" in --image) image=$2 ;; --values) values=$2 ;; --to) target=$2 ;; esac
+        shift 2
+        ;;
+      --yes) assume_yes=1 && shift ;;
+      -h | --help) usage && exit 0 ;;
+      *) fail "unknown option $1. Run with --help to see the options." ;;
+    esac
+  done
+  case "$command" in
+    preflight | deploy) [ -n "$image" ] || fail "$command needs --image <image@sha256:...>: the digest CI tagged main (runbook, section 2.2)." ;;
+    report | rollback) ;;
+    -h | --help | help) usage && exit 0 ;;
+    *) fail "say what to do: preflight, deploy, report or rollback. Run with --help to see the options." ;;
   esac
-done
-case "$command" in
-  preflight | deploy) [ -n "$image" ] || fail "$command needs --image <image@sha256:...>: the digest CI tagged main (runbook, section 2.2)." ;;
-  report | rollback) ;;
-  -h | --help | help) usage && exit 0 ;;
-  *) fail "say what to do: preflight, deploy, report or rollback. Run with --help to see the options." ;;
-esac
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-chmod 700 "$work"
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT
+  chmod 700 "$work"
+fi
 
 # ---- Landing-zone values ---------------------------------------------------------------------
 
@@ -296,15 +300,39 @@ Nothing in Azure was changed. Deploy main's image from after both tasks merge (r
   say "Image $digest is main's, built from commit ${commit:0:7}, with migrations, Entra sign-in and the smoke test"
 }
 
-# Sign-in: assignment required, no client secret, the redirect URI registered (once it is known), a role per group.
+# The app consumes exactly these ID-token claims and group-capable app roles. Keeping the manifest
+# check here makes a broken identity registration fail before a revision is changed.
+check_entra_application() {
+  local app=$1 actual expected
+  entra_line "$(printf '%s' "$app" | jq -r '[.optionalClaims.idToken[]?.name] | unique | sort | join(" ")')" "acct email" \
+    "the ID token has exactly the optional acct and email claims"
+  entra_line "$(printf '%s' "$app" | jq -r '[(.web.implicitGrantSettings.enableIdTokenIssuance // false), (.web.implicitGrantSettings.enableAccessTokenIssuance // false)] | join(" ")')" \
+    "false false" "implicit ID-token and access-token grants are disabled"
+  actual=$(printf '%s' "$app" | jq -r \
+    '[.appRoles[]? | [.value, (.isEnabled | tostring), ((.allowedMemberTypes // []) | unique | sort | join(","))] | join("|")] | sort | join(";")')
+  expected="BrandTeam|true|User;Comms|true|User;Launch.Manager|true|User;Supply|true|User;VM|true|User;Viewer|true|User;Workspace.Admin|true|User"
+  entra_line "$actual" "$expected" "exactly the seven enabled User (users/groups) app roles are defined"
+}
+
+check_federated_credential() {
+  local credentials=$1 principal=$2 issuer
+  issuer="https://login.microsoftonline.com/$LZ_ENTRA_TENANT_ID/v2.0"
+  entra_line "$(printf '%s' "$credentials" | jq -r --arg subject "$principal" --arg issuer "$issuer" \
+    '[.[] | select(.subject == $subject and .issuer == $issuer and .audiences == ["api://AzureADTokenExchange"])] | length')" \
+    1 "exactly one federated credential trusts id-lt-app with the Entra token-exchange audience"
+}
+
+# Sign-in: assignment required, no client secret, exact token contract, the redirect URI registered
+# once it is known, a role per group, and (option A) the managed identity's exact federation tuple.
 check_entra() {
-  local sp app uri roles_json assigned role group value missing=""
+  local require_infrastructure=${1:-allow-missing} sp app uri roles_json assigned role group value missing="" principal credentials
   sp=$(az ad sp show --id "$LZ_ENTRA_CLIENT_ID" --only-show-errors -o json 2>/dev/null) ||
     fail "tenant $LZ_ENTRA_TENANT_ID has no enterprise application for client ID $LZ_ENTRA_CLIENT_ID. Check ENTRA_CLIENT_ID, or ask the identity team to create it."
   app=$(az ad app show --id "$LZ_ENTRA_CLIENT_ID" --only-show-errors -o json)
   entra_line "$(printf '%s' "$sp" | jq -r .appRoleAssignmentRequired)" true "the enterprise application requires assignment"
   entra_line "$(printf '%s' "$app" | jq -r .signInAudience)" AzureADMyOrg "the app registration is single tenant"
   entra_line "$(printf '%s' "$app" | jq -r '.passwordCredentials | length')" 0 "the app registration has no client secret"
+  check_entra_application "$app"
   uri=$(redirect_uri)
   if [ -n "$uri" ]; then
     entra_line "$(printf '%s' "$app" | jq -r --arg uri "$uri" '.web.redirectUris | index($uri) != null')" true "the redirect URI $uri is registered"
@@ -320,9 +348,56 @@ check_entra() {
       '.value | any(.principalId == $group and .appRoleId == $role)' >/dev/null || missing="$missing $value"
   done
   entra_line "${missing:- none}" " none" "each app role is assigned to its group (missing:${missing:- none})"
+
+  if [ "$LZ_ENTRA_CREDENTIAL" = managed-identity ]; then
+    principal=$(azq identity show -g "$LZ_RESOURCE_GROUP" -n id-lt-app --query principalId 2>/dev/null || true)
+    if [ -z "$principal" ]; then
+      if [ "$require_infrastructure" = required ]; then
+        entra_line "missing" "present" "id-lt-app exists so its federated credential can be verified"
+      else
+        printf 'NOTE Sign-in: id-lt-app is created by the first infrastructure deployment; the next preflight verifies its federated credential before the app is changed\n'
+      fi
+    else
+      credentials=$(az ad app federated-credential list --id "$LZ_ENTRA_CLIENT_ID" --only-show-errors -o json)
+      check_federated_credential "$credentials" "$principal"
+    fi
+  fi
 }
 
 entra_line() { check "$1" "$2" "Sign-in: $3"; }
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# The target resource scopes the connection query, so a central registry's endpoint may live in a
+# different resource group. A connection counts only when its exact subresource uses the supplied
+# landing-zone DNS zone; unrelated endpoints on a shared resource are left alone.
+check_private_endpoint() {
+  local label=$1 target_resource_id=$2 group_id=$3 expected_zone_id=$4 connections endpoint_id status endpoint_subscription endpoint_rg endpoint_name zones
+  local matches=0 matched_status="" expected_zone
+  expected_zone=$(lower "$expected_zone_id")
+  connections=$(az network private-endpoint-connection list --id "$target_resource_id" --only-show-errors -o json)
+  while IFS=$'\t' read -r endpoint_id status; do
+    [ -n "$endpoint_id" ] || continue
+    endpoint_subscription=$(printf '%s' "$endpoint_id" | jq -Rr 'split("/")[2] // ""')
+    endpoint_rg=$(printf '%s' "$endpoint_id" | jq -Rr 'split("/")[4] // ""')
+    endpoint_name=$(printf '%s' "$endpoint_id" | jq -Rr 'split("/")[8] // ""')
+    zones=$(az network private-endpoint dns-zone-group list -g "$endpoint_rg" --endpoint-name "$endpoint_name" --subscription "$endpoint_subscription" --only-show-errors -o json)
+    if [ "$(printf '%s' "$zones" | jq -r \
+      '[.[]? | (.privateDnsZoneConfigs // .properties.privateDnsZoneConfigs // [])[]? | (.privateDnsZoneId // .properties.privateDnsZoneId // "") | ascii_downcase] | unique | sort | join(" ")')" = "$expected_zone" ]; then
+      matches=$((matches + 1))
+      matched_status=$status
+    fi
+  done < <(printf '%s' "$connections" | jq -r --arg group "$group_id" \
+    '.[]? | select((.groupIds // .properties.groupIds // []) == [$group]) | [(.privateEndpoint.id // .properties.privateEndpoint.id // ""), (.privateLinkServiceConnectionState.status // .properties.privateLinkServiceConnectionState.status // "")] | @tsv')
+  check "$matches" 1 "Network: $label has exactly one $group_id private endpoint in DNS zone $expected_zone_id"
+  if [ "$matches" -eq 1 ]; then
+    check "$matched_status" Approved "Network: $label's $group_id private endpoint connection is approved"
+  fi
+}
+
+check_route_table_association() {
+  check "$(lower "$1")" "$(lower "$2")" "Network: snet-cae is associated with the declared route table"
+}
 
 # ---- Report lines ----------------------------------------------------------------------------
 
@@ -512,14 +587,9 @@ report() {
 
   # Sign-in
   check "$(printf '%s' "$live_json" | jq -r '.properties.template.containers[0].env[] | select(.name == "AUTH_MODE") | .value')" entra "Sign-in: the live revision runs with AUTH_MODE=entra"
-  check_entra
+  check_entra required
   check "$(printf '%s' "$live_json" | jq -r '.properties.template.containers[0].env[] | select(.name == "PUBLIC_ORIGIN") | .value')" "$(public_origin)" \
     "Sign-in: the live revision's PUBLIC_ORIGIN is the app's own address"
-  if [ "$LZ_ENTRA_CREDENTIAL" = managed-identity ]; then
-    principal=$(azq identity show -g "$rg" -n id-lt-app --query principalId)
-    check "$(az ad app federated-credential list --id "$LZ_ENTRA_CLIENT_ID" --only-show-errors -o json | jq -r --arg s "$principal" --arg i "https://login.microsoftonline.com/$LZ_ENTRA_TENANT_ID/v2.0" 'any(.[]; .subject == $s and .issuer == $i)')" true \
-      "Sign-in: the app registration trusts id-lt-app as its federated credential (option A)"
-  fi
   probe "$(printf '%s' "$app_json" | jq -r '.properties.configuration.ingress.fqdn')" "$(printf '%s' "$live_json" | jq -r '.properties.template.containers[0].image | split("@")[1]')"
 
   # Roles: exactly these, on exactly these resources
@@ -557,14 +627,16 @@ Key Vault Crypto User $kv_id"
     value=$(az acr show -g "$rg" -n "$(infra registryName)" --only-show-errors -o json | jq -r '[.adminUserEnabled, .anonymousPullEnabled, .publicNetworkAccess] | join(" ")')
     check "$value" "false false Disabled" "Registry: no admin user, no anonymous pull, no public network"
   else
-    value=$(az acr show --ids "$LZ_REGISTRY" --only-show-errors -o json | jq -r '[.adminUserEnabled, .anonymousPullEnabled] | join(" ")')
-    check "$value" "false false" "Registry (the landing zone's): no admin user, no anonymous pull"
+    value=$(az acr show --ids "$LZ_REGISTRY" --only-show-errors -o json | jq -r '[.adminUserEnabled, .anonymousPullEnabled, .publicNetworkAccess] | join(" ")')
+    check "$value" "false false Disabled" "Registry (the landing zone's): no admin user, no anonymous pull, no public network"
   fi
 
   # PostgreSQL
-  local server
+  local server postgres_id postgres_json
   server=$(infra postgresName)
-  value=$(az postgres flexible-server show -g "$rg" -n "$server" --only-show-errors -o json | jq -r '[.authConfig.passwordAuth, .authConfig.activeDirectoryAuth, .network.publicNetworkAccess, (.backup.backupRetentionDays >= 7)] | join(" ")')
+  postgres_json=$(az postgres flexible-server show -g "$rg" -n "$server" --only-show-errors -o json)
+  postgres_id=$(printf '%s' "$postgres_json" | jq -r .id)
+  value=$(printf '%s' "$postgres_json" | jq -r '[.authConfig.passwordAuth, .authConfig.activeDirectoryAuth, .network.publicNetworkAccess, (.backup.backupRetentionDays >= 7)] | join(" ")')
   check "$value" "Disabled Enabled Disabled true" "PostgreSQL: Entra sign-in only, no public network, backups kept 7 days or more"
   for setting in require_secure_transport=on ssl_min_protocol_version=TLSv1.2 shared_preload_libraries=pgaudit pgaudit.log=DDL,ROLE; do
     check "$(azq postgres flexible-server parameter show -g "$rg" -s "$server" -n "${setting%%=*}" --query value)" "${setting#*=}" "PostgreSQL: ${setting%%=*} is ${setting#*=}"
@@ -576,8 +648,21 @@ Key Vault Crypto User $kv_id"
 
   # Network
   check "$(printf '%s' "$env_json" | jq -r .properties.vnetConfiguration.internal)" true "Network: the Container Apps environment is internal"
-  value=$(azq network private-endpoint list -g "$rg" --query "[].privateLinkServiceConnections[0].privateLinkServiceConnectionState.status" | sort -u | tr '\n' ' ')
-  check "$value" "Approved " "Network: every private endpoint is approved"
+  check_private_endpoint "Blob storage" "$storage_id" blob "$LZ_BLOB_DNS_ZONE_ID"
+  check_private_endpoint "Key Vault" "$kv_id" vault "$LZ_KEYVAULT_DNS_ZONE_ID"
+  check_private_endpoint "container registry" "$registry_id" registry "$LZ_REGISTRY_DNS_ZONE_ID"
+  if [ "$LZ_POSTGRES_NETWORKING" = private-endpoint ]; then
+    check_private_endpoint "PostgreSQL" "$postgres_id" postgresqlServer "$LZ_POSTGRES_DNS_ZONE_ID"
+  else
+    expected=$(azq network vnet subnet show -g "$rg" --vnet-name "$(infra vnetName)" --name snet-psql --query id)
+    actual=$(printf '%s' "$postgres_json" | jq -r '.network.delegatedSubnetResourceId // ""')
+    check "$(lower "$actual")" "$(lower "$expected")" "Network: PostgreSQL uses the declared delegated snet-psql subnet"
+    actual=$(printf '%s' "$postgres_json" | jq -r '.network.privateDnsZoneArmResourceId // ""')
+    check "$(lower "$actual")" "$(lower "$LZ_POSTGRES_DNS_ZONE_ID")" "Network: PostgreSQL VNet integration uses the supplied private DNS zone"
+  fi
+  expected=$(azq network route-table show -g "$rg" -n "$(infra routeTableName)" --query id)
+  actual=$(azq network vnet subnet show -g "$rg" --vnet-name "$(infra vnetName)" --name snet-cae --query routeTable.id)
+  check_route_table_association "$actual" "$expected"
   value=$(azq network route-table route list -g "$rg" --route-table-name "$(infra routeTableName)" --query "[?addressPrefix=='0.0.0.0/0'].join(' ', [nextHopType, nextHopIpAddress]) | [0]")
   check "$value" "VirtualAppliance $LZ_HUB_FIREWALL_IP" "Network: all egress from snet-cae goes to the hub firewall"
   value=$(azq network vnet peering list -g "$rg" --vnet-name "$(infra vnetName)" --query "[?peeringState=='Connected'] | length(@)")
@@ -589,7 +674,7 @@ Key Vault Crypto User $kv_id"
 
   # Logs
   diagnostics "$kv_id" AuditEvent "Key Vault"
-  [ "$LZ_REGISTRY" = create ] && diagnostics "$registry_id" "ContainerRegistryLoginEvents ContainerRegistryRepositoryEvents" "Registry"
+  diagnostics "$registry_id" "ContainerRegistryLoginEvents ContainerRegistryRepositoryEvents" "Registry"
   diagnostics "$storage_id/blobServices/default" "StorageDelete StorageRead StorageWrite" "Blob storage"
   diagnostics "$(azq postgres flexible-server show -g "$rg" -n "$server" --query id)" PostgreSQLLogs "PostgreSQL"
   diagnostics "$(printf '%s' "$env_json" | jq -r .id)" "ContainerAppConsoleLogs ContainerAppSystemLogs" "Container Apps"
@@ -659,27 +744,32 @@ rollback() {
 
 # ---- Main ------------------------------------------------------------------------------------
 
-check_tools
-read_values
-check_account
-# Everything read-only runs first, so the landing-zone values can be tested before an image is ready;
-# the image is refused before the first write to Azure.
-case "$command" in
-  preflight | deploy)
-    printf '\nThe Entra app registration:\n'
-    check_entra
-    what_if_infra
-    [ "$failures" = 0 ] || fail "the Entra app registration is not ready; each FAIL line above says what the identity team must change."
-    check_image
-    if [ "$command" = preflight ]; then
-      printf '\nPreflight passed: run deploy with the same --image.\n'
-    else
-      deploy_infra
-      check_redirect_uri
-      deploy_app
-      report
-    fi
-    ;;
-  report) report ;;
-  rollback) rollback ;;
-esac
+if [ "${DEPLOY_SH_LIBRARY_ONLY:-0}" != 1 ]; then
+  check_tools
+  read_values
+  check_account
+  # Everything read-only runs first, so the landing-zone values can be tested before an image is ready;
+  # the image is refused before the first write to Azure.
+  case "$command" in
+    preflight | deploy)
+      printf '\nThe Entra app registration:\n'
+      check_entra
+      what_if_infra
+      [ "$failures" = 0 ] || fail "the Entra app registration is not ready; each FAIL line above says what the identity team must change."
+      check_image
+      if [ "$command" = preflight ]; then
+        printf '\nPreflight passed: run deploy with the same --image.\n'
+      else
+        deploy_infra
+        check_redirect_uri
+        printf '\nRe-checking the Entra app registration now that id-lt-app exists:\n'
+        check_entra required
+        [ "$failures" = 0 ] || fail "the Entra app registration is not ready; each FAIL line above says what the identity team must change. The infrastructure is kept, but the app was not changed."
+        deploy_app
+        report
+      fi
+      ;;
+    report) report ;;
+    rollback) rollback ;;
+  esac
+fi
