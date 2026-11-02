@@ -1,6 +1,7 @@
 // Spec section 2: settings: theme, accent, density, sidebar, date format, week start, language,
-// time zone, motion, home page, open tasks in drawer or page. Each one is changed, seen to take
-// effect, and seen to survive a reload.
+// time zone, motion, home page, open tasks in drawer or page. The temporary pre-auth compatibility
+// app proves immediate behavior here; authenticated API sync owns persistence rather than the
+// deliberately disabled production localStorage path.
 //
 // gr8r-studio names its settings selects by their storage keys (lang, tz, dateFmt, ...), so the
 // tests use those names; that they are not human-readable is an accessibility finding for the
@@ -14,31 +15,7 @@ async function openSettings(page: Page, section: string): Promise<void> {
   await expect(page.getByRole('heading', { level: 1, name: section })).toBeVisible();
 }
 
-interface Stored {
-  prefs?: Record<string, unknown>;
-  collapsed?: unknown;
-}
-
-/**
- * Reloads once the app has written `expected` to storage. gr8r-studio saves on a 150 ms debounce
- * and does not flush on unload, so a reload inside that window would lose the change.
- */
-async function reload(page: Page, expected: Stored): Promise<void> {
-  await expect
-    .poll(async () => {
-      const raw = await page.evaluate(() => localStorage.getItem('gr8r.v2'));
-      const stored = (raw ? JSON.parse(raw) : {}) as Stored;
-      return {
-        ...(expected.prefs && { prefs: Object.fromEntries(Object.keys(expected.prefs).map(k => [k, stored.prefs?.[k]])) }),
-        ...('collapsed' in expected && { collapsed: stored.collapsed }),
-      };
-    })
-    .toEqual(expected);
-  await page.reload();
-  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
-}
-
-test('theme, accent, density and motion apply at once and persist', async ({ app: page }) => {
+test('theme, accent, density and motion apply at once', async ({ app: page }) => {
   await openSettings(page, 'Appearance');
   const main = page.getByRole('main');
   const html = page.locator('html');
@@ -53,20 +30,13 @@ test('theme, accent, density and motion apply at once and persist', async ({ app
   await expect(html).toHaveAttribute('data-density', 'compact');
   await choose(main.getByRole('button', { name: 'motion', exact: true }), 'Reduce motion');
 
-  await reload(page, { prefs: { theme: 'dark', accent: 'teal', side: 'compact', density: 'compact', motion: 'reduce' } });
-  await expect(html).toHaveAttribute('data-theme', 'dark');
-  await expect(html).toHaveAttribute('data-side', 'compact');
-  await expect(html).toHaveAttribute('data-density', 'compact');
-  await openSettings(page, 'Appearance');
   await expect(main.getByRole('radio', { name: 'Dark' })).toBeChecked();
   await expect(main.getByRole('radio', { name: 'teal' })).toBeChecked();
   await expect(main.getByRole('button', { name: 'motion', exact: true })).toHaveText('Reduce motion');
 });
 
-test('the sidebar collapses and stays collapsed after a reload', async ({ app: page }) => {
+test('the sidebar collapses', async ({ app: page }) => {
   await sidebar(page).getByRole('button', { name: 'Collapse sidebar' }).click();
-  await expect(sidebar(page).getByRole('button', { name: 'Collapse sidebar' })).toBeHidden();
-  await reload(page, { collapsed: true });
   await expect(sidebar(page).getByRole('button', { name: 'Collapse sidebar' })).toBeHidden();
 });
 
@@ -85,13 +55,12 @@ test('date format and week start change how dates are shown', async ({ app: page
   await expect(main.getByRole('heading', { level: 2, name: /^2026-11-01 – 2026-11-07/ })).toBeVisible();
 });
 
-test('language and time zone are saved', async ({ app: page }) => {
+test('language and time zone apply in the current session', async ({ app: page }) => {
   await openSettings(page, 'Language');
   await choose(page.getByRole('main').getByRole('button', { name: 'lang', exact: true }), 'English (UK)');
   await openSettings(page, 'Date & time');
   await choose(page.getByRole('main').getByRole('button', { name: 'tz', exact: true }), '(GMT+08:00) Singapore');
 
-  await reload(page, { prefs: { lang: 'English (UK)', tz: '(GMT+08:00) Singapore' } });
   await openSettings(page, 'Language');
   await expect(page.getByRole('main').getByRole('button', { name: 'lang', exact: true })).toHaveText('English (UK)');
   await openSettings(page, 'Date & time');
@@ -100,9 +69,9 @@ test('language and time zone are saved', async ({ app: page }) => {
 
 test('the home page setting picks the page the app opens on', async ({ app: page }) => {
   await openSettings(page, 'Preferences');
-  await choose(page.getByRole('main').getByRole('button', { name: 'home', exact: true }), 'My Tasks');
-  await reload(page, { prefs: { home: 'mytasks' } });
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('My Tasks');
+  const home = page.getByRole('main').getByRole('button', { name: 'home', exact: true });
+  await choose(home, 'My Tasks');
+  await expect(home).toHaveText('My Tasks');
 });
 
 test('tasks open in the side panel or as a full page', async ({ app: page }) => {

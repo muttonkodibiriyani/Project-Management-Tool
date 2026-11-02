@@ -1,8 +1,9 @@
 import { test as base, expect, type Locator, type Page } from '@playwright/test';
 
 /**
- * Every test starts from a fresh browser context, so gr8r-studio seeds its demo workspace into an
- * empty localStorage: each test owns its data and never sees another test's changes.
+ * Every test starts from a fresh browser context, so gr8r-studio's temporary compatibility seed is
+ * a fresh in-memory workspace: each test owns its data and never sees another test's changes. The
+ * authenticated boot replaces it before protected pages render; production localStorage stays off.
  *
  * The clock is fixed, because the seed dates tasks relative to today ("Today", "Tomorrow", "2d ago"):
  * a frozen Wednesday morning keeps every relative date the same on every run.

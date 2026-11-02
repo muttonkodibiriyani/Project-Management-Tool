@@ -76,7 +76,10 @@ export function load() {
 }
 export const saved = load();
 export const S = {
-  data: saved?.data || (DEV ? seed() : emptyData()),
+  // Keep the synthetic workspace in memory only until authenticated sync is installed. The
+  // installer clears it synchronously before touching the network, so it cannot reach a protected
+  // render or survive any authentication/bootstrap failure.
+  data: saved?.data || seed(),
   // Restricted endpoint responses live only in memory and are never stored with bootstrap.
   authorized: { launchDirectory: DEV ? syntheticLaunchDirectory() : null },
   prefs: Object.assign({}, DEFAULT_PREFS, saved?.prefs || {}),
