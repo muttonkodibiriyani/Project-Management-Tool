@@ -401,6 +401,19 @@ export function createSync({
     state.idMap ||= {};
     state.idMap[String(local)] = remote;
   };
+  const versionResource = operation => (operation.resource === 'followUp' ? 'task' : operation.resource);
+  const versionKey = operation => `${versionResource(operation)}:${String(operation.row?.id)}`;
+  const etagFor = operation => state?.rowCheckpoints?.[versionKey(operation)]?.version ?? versionOf(operation.before);
+  const checkpointRow = (operation, response) => {
+    const version = response?.data?.version;
+    if (version === undefined || version === null) return;
+    state.rowCheckpoints ||= {};
+    state.rowCheckpoints[versionKey(operation)] = {
+      id: response.data.id,
+      version,
+      row: json(response.data),
+    };
+  };
 
   const persist = () => {
     if (!state || !key) return;
@@ -458,10 +471,14 @@ export function createSync({
       if (operation.action === 'create') {
         const result = await request(path('/projects'), { ...options, method: 'POST', body: projectBody(operation.row, true) });
         remember(operation.row.id, result.data.id);
-      } else if (operation.action === 'delete') await request(path(`/projects/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
+        checkpointRow(operation, result);
+      } else if (operation.action === 'delete') await request(path(`/projects/${id}`), { method: 'DELETE', etag: etagFor(operation) });
       else {
         const body = changed(projectBody(operation.before, false), projectBody(operation.row, false), Object.keys(projectBody(operation.row, false)));
-        if (Object.keys(body).length) await request(path(`/projects/${id}`), { method: 'PATCH', etag: versionOf(operation.before), body });
+        if (Object.keys(body).length) {
+          const result = await request(path(`/projects/${id}`), { method: 'PATCH', etag: etagFor(operation), body });
+          checkpointRow(operation, result);
+        }
       }
       return;
     }
@@ -469,14 +486,18 @@ export function createSync({
       if (operation.action === 'create') {
         const result = await request(path('/tasks'), { ...options, method: 'POST', body: taskBody(operation.row, true, resolve) });
         remember(operation.row.id, result.data.id);
-      } else if (operation.action === 'delete') await request(path(`/tasks/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
+        checkpointRow(operation, result);
+      } else if (operation.action === 'delete') await request(path(`/tasks/${id}`), { method: 'DELETE', etag: etagFor(operation) });
       else {
         const body = changed(
           taskBody(operation.before, false, resolve),
           taskBody(operation.row, false, resolve),
           Object.keys(taskBody(operation.row, false, resolve)),
         );
-        if (Object.keys(body).length) await request(path(`/tasks/${id}`), { method: 'PATCH', etag: versionOf(operation.before), body });
+        if (Object.keys(body).length) {
+          const result = await request(path(`/tasks/${id}`), { method: 'PATCH', etag: etagFor(operation), body });
+          checkpointRow(operation, result);
+        }
       }
       return;
     }
@@ -495,6 +516,7 @@ export function createSync({
         },
       });
       remember(operation.row.id, result.data.id);
+      checkpointRow(operation, result);
       return;
     }
     if (operation.resource === 'comment') {
@@ -505,9 +527,12 @@ export function createSync({
           body: { body: operation.row.text, mentionIds: operation.row.mentionIds || [] },
         });
         remember(operation.row.id, result.data.id);
-      } else if (operation.action === 'delete') await request(path(`/comments/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
-      else if (operation.before.text !== operation.row.text)
-        await request(path(`/comments/${id}`), { method: 'PATCH', etag: versionOf(operation.before), body: { body: operation.row.text } });
+        checkpointRow(operation, result);
+      } else if (operation.action === 'delete') await request(path(`/comments/${id}`), { method: 'DELETE', etag: etagFor(operation) });
+      else if (operation.before.text !== operation.row.text) {
+        const result = await request(path(`/comments/${id}`), { method: 'PATCH', etag: etagFor(operation), body: { body: operation.row.text } });
+        checkpointRow(operation, result);
+      }
       return;
     }
     if (operation.resource === 'subtask') {
@@ -519,11 +544,15 @@ export function createSync({
           body: { title: operation.row.title, position: operation.row.position ?? 0 },
         });
         remember(operation.row.id, result.data.id);
+        checkpointRow(operation, result);
       } else if (operation.action === 'delete') {
-        await request(path(`/subtasks/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
+        await request(path(`/subtasks/${id}`), { method: 'DELETE', etag: etagFor(operation) });
       } else {
         const body = changed(operation.before, operation.row, ['title', 'done', 'position']);
-        if (Object.keys(body).length) await request(path(`/subtasks/${id}`), { method: 'PATCH', etag: versionOf(operation.before), body });
+        if (Object.keys(body).length) {
+          const result = await request(path(`/subtasks/${id}`), { method: 'PATCH', etag: etagFor(operation), body });
+          checkpointRow(operation, result);
+        }
       }
       return;
     }
@@ -549,7 +578,8 @@ export function createSync({
       if (operation.action === 'create') {
         const result = await request(path('/events'), { ...options, method: 'POST', body });
         remember(operation.row.id, result.data.id);
-      } else if (operation.action === 'delete') await request(path(`/events/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
+        checkpointRow(operation, result);
+      } else if (operation.action === 'delete') await request(path(`/events/${id}`), { method: 'DELETE', etag: etagFor(operation) });
       else {
         const old = {
           projectId: resolve(operation.before.project || operation.before.projectId) || null,
@@ -558,7 +588,10 @@ export function createSync({
           timeText: operation.before.time || operation.before.timeText || null,
         };
         const patch = changed(old, body, Object.keys(body));
-        if (Object.keys(patch).length) await request(path(`/events/${id}`), { method: 'PATCH', etag: versionOf(operation.before), body: patch });
+        if (Object.keys(patch).length) {
+          const result = await request(path(`/events/${id}`), { method: 'PATCH', etag: etagFor(operation), body: patch });
+          checkpointRow(operation, result);
+        }
       }
       return;
     }
@@ -573,7 +606,8 @@ export function createSync({
       if (operation.action === 'create') {
         const result = await request(path('/views'), { ...options, method: 'POST', body });
         remember(operation.row.id, result.data.id);
-      } else if (operation.action === 'delete') await request(path(`/views/${id}`), { method: 'DELETE', etag: versionOf(operation.before) });
+        checkpointRow(operation, result);
+      } else if (operation.action === 'delete') await request(path(`/views/${id}`), { method: 'DELETE', etag: etagFor(operation) });
       else {
         const old = {
           name: operation.before.name,
@@ -582,7 +616,10 @@ export function createSync({
           projectId: operation.before.project || operation.before.projectId || null,
         };
         const patch = changed(old, body, ['name', 'type', 'config']);
-        if (Object.keys(patch).length) await request(path(`/views/${id}`), { method: 'PATCH', etag: versionOf(operation.before), body: patch });
+        if (Object.keys(patch).length) {
+          const result = await request(path(`/views/${id}`), { method: 'PATCH', etag: etagFor(operation), body: patch });
+          checkpointRow(operation, result);
+        }
       }
       return;
     }
@@ -591,11 +628,12 @@ export function createSync({
       return;
     }
     if (operation.resource === 'notification') {
-      await request(`/api/v1/me/notifications/${id}`, {
+      const result = await request(`/api/v1/me/notifications/${id}`, {
         method: 'PATCH',
-        etag: versionOf(operation.before),
+        etag: etagFor(operation),
         body: { read: Boolean(operation.row.read), archived: Boolean(operation.row.archived) },
       });
+      checkpointRow(operation, result);
       return;
     }
     if (operation.resource === 'prefs') {
@@ -637,6 +675,7 @@ export function createSync({
         }
         const index = state.outbox.findIndex(item => item.id === pending.id);
         if (index >= 0) state.outbox.splice(index, 1);
+        if (state.outbox.length === 0) state.rowCheckpoints = {};
         profile.prefs = pending.prefs;
         persist();
         await bootstrap({ publishData: state.outbox.length === 0 });
@@ -690,10 +729,21 @@ export function createSync({
     key = cacheKey(profile, workspace);
     state = parse(storage, key);
     if (!state || state.userId !== profile.user.id || state.workspaceId !== workspace.id) {
-      state = { userId: profile.user.id, workspaceId: workspace.id, workspaceSlug: workspace.slug, changeSeq: 0, base: null, outbox: [], idMap: {} };
+      state = {
+        userId: profile.user.id,
+        workspaceId: workspace.id,
+        workspaceSlug: workspace.slug,
+        changeSeq: 0,
+        base: null,
+        outbox: [],
+        idMap: {},
+        rowCheckpoints: {},
+      };
     }
     state.outbox ||= [];
     state.idMap ||= {};
+    state.rowCheckpoints ||= {};
+    if (state.outbox.length === 0) state.rowCheckpoints = {};
     if (state.outbox.some(pending => !Array.isArray(pending.plan))) {
       if (!state.base) throw new Error('Offline changes from an older app version cannot be resumed safely. Keep this tab open and contact support.');
       let before = toLegacyData(state.base, profile, null, sessions);

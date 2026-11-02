@@ -522,6 +522,340 @@ test('a resumed edit never resurrects a concurrently deleted remote row', async 
   assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
 });
 
+test('a queued edit to a just-created row uses the accepted create version', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let projectPosts = 0;
+  let projectPatches = 0;
+  let projectDeletes = 0;
+  const patchEtags = [];
+  let visible;
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/projects' && options.method === 'POST') {
+      projectPosts += 1;
+      const created = { id: 'server-project', version: 1, ...options.body, memberIds: [], favourite: false };
+      serverBoot.projects.push(created);
+      return { data: structuredClone(created) };
+    }
+    if (path === '/api/v1/w/synthetic/projects/server-project' && options.method === 'PATCH') {
+      projectPatches += 1;
+      patchEtags.push(options.etag);
+      const current = serverBoot.projects.find(project => project.id === 'server-project');
+      if (options.etag !== current.version) throw Object.assign(new Error('A row version is required.'), { status: 428 });
+      Object.assign(current, options.body, { version: current.version + 1 });
+      return { data: structuredClone(current) };
+    }
+    if (path === '/api/v1/w/synthetic/projects/server-project' && options.method === 'DELETE') {
+      projectDeletes += 1;
+      return { data: null };
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const controller = createSync({
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  });
+  await controller.start();
+  const created = structuredClone(visible);
+  created.projects.push({
+    id: 'local-project',
+    key: 'NEW',
+    name: 'First name',
+    kind: 'general',
+    color: 'indigo',
+    status: 'planning',
+    members: [],
+  });
+  controller.queueSnapshot({ data: created, prefs: PROFILE.prefs });
+  const edited = structuredClone(created);
+  edited.projects.at(-1).name = 'Final name';
+  controller.queueSnapshot({ data: edited, prefs: PROFILE.prefs });
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  await waitFor(() => assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []));
+  controller.stop();
+
+  assert.equal(projectPosts, 1);
+  assert.equal(projectPatches, 1);
+  assert.deepEqual(patchEtags, [1]);
+  assert.equal(projectDeletes, 0);
+  assert.equal(serverBoot.projects.find(project => project.id === 'server-project').name, 'Final name');
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).rowCheckpoints, {});
+});
+
+test('a queued edit to a just-created row keeps its accepted version across restart', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let projectPosts = 0;
+  let projectPatches = 0;
+  let projectDeletes = 0;
+  let failPatch = true;
+  const patchEtags = [];
+  const statuses = [];
+  let visible;
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/projects' && options.method === 'POST') {
+      projectPosts += 1;
+      const created = { id: 'server-project', version: 1, ...options.body, memberIds: [], favourite: false };
+      serverBoot.projects.push(created);
+      return { data: structuredClone(created) };
+    }
+    if (path === '/api/v1/w/synthetic/projects/server-project' && options.method === 'PATCH') {
+      projectPatches += 1;
+      patchEtags.push(options.etag);
+      if (failPatch) throw new Error('The edit response was interrupted.');
+      const current = serverBoot.projects.find(project => project.id === 'server-project');
+      if (options.etag !== current.version) throw Object.assign(new Error('A row version is required.'), { status: 428 });
+      Object.assign(current, options.body, { version: current.version + 1 });
+      return { data: structuredClone(current) };
+    }
+    if (path === '/api/v1/w/synthetic/projects/server-project' && options.method === 'DELETE') {
+      projectDeletes += 1;
+      return { data: null };
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const created = structuredClone(visible);
+  created.projects.push({
+    id: 'local-project',
+    key: 'NEW',
+    name: 'First name',
+    kind: 'general',
+    color: 'indigo',
+    status: 'planning',
+    members: [],
+  });
+  first.queueSnapshot({ data: created, prefs: PROFILE.prefs });
+  const edited = structuredClone(created);
+  edited.projects.at(-1).name = 'Final name';
+  first.queueSnapshot({ data: edited, prefs: PROFILE.prefs });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  first.stop();
+
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  const interrupted = JSON.parse(storage.getItem(pointer.key));
+  assert.deepEqual(interrupted.rowCheckpoints['project:local-project'], {
+    id: 'server-project',
+    version: 1,
+    row: serverBoot.projects.find(project => project.id === 'server-project'),
+  });
+  assert.equal(interrupted.idMap['local-project'], 'server-project');
+
+  failPatch = false;
+  const second = createSync(options);
+  await second.start();
+  second.stop();
+
+  assert.equal(projectPosts, 1, 'restart never repeats the accepted create');
+  assert.equal(projectPatches, 2);
+  assert.deepEqual(patchEtags, [1, 1]);
+  assert.equal(projectDeletes, 0);
+  assert.equal(serverBoot.projects.find(project => project.id === 'server-project').name, 'Final name');
+  const completed = JSON.parse(storage.getItem(pointer.key));
+  assert.deepEqual(completed.outbox, []);
+  assert.deepEqual(completed.rowCheckpoints, {});
+});
+
+for (const scenario of [
+  { name: 'in one session', loseFirstCreateResponse: false },
+  { name: 'after a lost create response and restart', loseFirstCreateResponse: true },
+]) {
+  test(`chained project, task and comment creates keep canonical ids and versions ${scenario.name}`, async () => {
+    const storage = new MemoryStorage();
+    let serverBoot = structuredClone(BOOT);
+    let loseProjectResponse = scenario.loseFirstCreateResponse;
+    let projectTransports = 0;
+    let projectCreates = 0;
+    let taskCreates = 0;
+    let commentCreates = 0;
+    let deletes = 0;
+    const projectPatchEtags = [];
+    const taskPatchEtags = [];
+    const commentPatchEtags = [];
+    const taskProjectIds = [];
+    const commentPaths = [];
+    const statuses = [];
+    let visible;
+    const request = async (path, options = {}) => {
+      if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+      if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+      if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+      if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+      if (options.method === 'DELETE') {
+        deletes += 1;
+        return { data: null };
+      }
+      if (path === '/api/v1/w/synthetic/projects' && options.method === 'POST') {
+        projectTransports += 1;
+        let created = serverBoot.projects.find(project => project.id === 'server-project');
+        if (!created) {
+          projectCreates += 1;
+          created = { id: 'server-project', version: 11, ...options.body, memberIds: [], favourite: false };
+          serverBoot.projects.push(created);
+        }
+        if (loseProjectResponse) {
+          loseProjectResponse = false;
+          throw new Error('The create response was lost after server acceptance.');
+        }
+        return { data: structuredClone(created) };
+      }
+      if (path === '/api/v1/w/synthetic/tasks' && options.method === 'POST') {
+        taskCreates += 1;
+        taskProjectIds.push(options.body.projectId);
+        const created = {
+          id: 'server-task',
+          version: 21,
+          ...options.body,
+          subtasks: [],
+          dependencyIds: [],
+          attachmentIds: [],
+        };
+        serverBoot.tasks.push(created);
+        return { data: structuredClone(created) };
+      }
+      if (path === '/api/v1/w/synthetic/tasks/server-task/comments' && options.method === 'POST') {
+        commentCreates += 1;
+        commentPaths.push(path);
+        const created = {
+          id: 'server-comment',
+          version: 31,
+          taskId: 'server-task',
+          authorId: 'user-1',
+          body: options.body.body,
+          reactions: [],
+          createdAt: '2026-11-02T12:00:00.000Z',
+        };
+        serverBoot.comments.push(created);
+        return { data: structuredClone(created) };
+      }
+      if (path === '/api/v1/w/synthetic/projects/server-project' && options.method === 'PATCH') {
+        projectPatchEtags.push(options.etag);
+        const current = serverBoot.projects.find(project => project.id === 'server-project');
+        if (options.etag !== current.version) throw Object.assign(new Error('Project version mismatch.'), { status: 409 });
+        Object.assign(current, options.body, { version: current.version + 1 });
+        return { data: structuredClone(current) };
+      }
+      if (path === '/api/v1/w/synthetic/tasks/server-task' && options.method === 'PATCH') {
+        taskPatchEtags.push(options.etag);
+        const current = serverBoot.tasks.find(task => task.id === 'server-task');
+        if (options.etag !== current.version) throw Object.assign(new Error('Task version mismatch.'), { status: 409 });
+        Object.assign(current, options.body, { version: current.version + 1 });
+        return { data: structuredClone(current) };
+      }
+      if (path === '/api/v1/w/synthetic/comments/server-comment' && options.method === 'PATCH') {
+        commentPatchEtags.push(options.etag);
+        const current = serverBoot.comments.find(comment => comment.id === 'server-comment');
+        if (options.etag !== current.version) throw Object.assign(new Error('Comment version mismatch.'), { status: 409 });
+        Object.assign(current, { body: options.body.body, version: current.version + 1 });
+        return { data: structuredClone(current) };
+      }
+      throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+    };
+    const options = {
+      request,
+      workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+      storage,
+      onData: data => {
+        visible = data;
+      },
+      onStatus: status => statuses.push(status),
+      setTimer: () => 1,
+      clearTimer: () => {},
+      events: {},
+    };
+    const first = createSync(options);
+    await first.start();
+    const created = structuredClone(visible);
+    created.projects.push({
+      id: 'local-project',
+      key: 'NEW',
+      name: 'First project name',
+      kind: 'general',
+      color: 'indigo',
+      status: 'planning',
+      members: [],
+    });
+    created.tasks.push({
+      id: 'local-task',
+      project: 'local-project',
+      title: 'First task title',
+      status: 'todo',
+      priority: 'medium',
+      subtasks: [],
+      deps: [],
+    });
+    first.queueSnapshot({ data: created, prefs: PROFILE.prefs });
+
+    const edited = structuredClone(created);
+    edited.projects.at(-1).name = 'Final project name';
+    edited.tasks.at(-1).title = 'Final task title';
+    edited.comments.push({ id: 'local-comment', task: 'local-task', author: 'user-1', text: 'First comment', re: {} });
+    first.queueSnapshot({ data: edited, prefs: PROFILE.prefs });
+
+    const childEdited = structuredClone(edited);
+    childEdited.comments.at(-1).text = 'Final comment';
+    first.queueSnapshot({ data: childEdited, prefs: PROFILE.prefs });
+
+    if (scenario.loseFirstCreateResponse) {
+      await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+      first.stop();
+      const resumed = createSync(options);
+      await resumed.start();
+      resumed.stop();
+    } else {
+      const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+      await waitFor(() => assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []));
+      first.stop();
+    }
+
+    assert.equal(projectTransports, scenario.loseFirstCreateResponse ? 2 : 1);
+    assert.equal(projectCreates, 1, 'the idempotency key accepts the project create once');
+    assert.equal(taskCreates, 1);
+    assert.equal(commentCreates, 1);
+    assert.equal(deletes, 0);
+    assert.deepEqual(taskProjectIds, ['server-project']);
+    assert.deepEqual(commentPaths, ['/api/v1/w/synthetic/tasks/server-task/comments']);
+    assert.deepEqual(projectPatchEtags, [11]);
+    assert.deepEqual(taskPatchEtags, [21]);
+    assert.deepEqual(commentPatchEtags, [31]);
+    assert.equal(serverBoot.projects.find(project => project.id === 'server-project').name, 'Final project name');
+    assert.equal(serverBoot.tasks.find(task => task.id === 'server-task').title, 'Final task title');
+    assert.equal(serverBoot.comments.find(comment => comment.id === 'server-comment').body, 'Final comment');
+    const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+    const completed = JSON.parse(storage.getItem(pointer.key));
+    assert.deepEqual(completed.outbox, []);
+    assert.deepEqual(completed.rowCheckpoints, {});
+  });
+}
+
 test('an accepted create keeps its server identity when a later edit resumes after restart', async () => {
   const storage = new MemoryStorage();
   let serverBoot = structuredClone(BOOT);
