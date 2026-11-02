@@ -9,6 +9,7 @@ import { AUTH_RATE_LIMIT } from './auth/plugin.js';
 import { devAuth } from './testing/sessions.js';
 import { buildApp, CONTENT_SECURITY_POLICY } from './app.js';
 import { publicHealth, type HealthReport } from './health.js';
+import { unusedBlobs } from './testing/blobs.js';
 
 const GR8R_DIST = fileURLToPath(new URL('../../gr8r-studio/dist/', import.meta.url));
 /** These tests never reach the database; a pool only connects on its first query. */
@@ -22,10 +23,17 @@ const report = (status: HealthReport['status']): HealthReport => ({
   imageDigest: `sha256:${'d'.repeat(64)}`,
   checks: [{ name: 'PostgreSQL', ok: status === 'ok', ms: 1, ...(status === 'ok' ? {} : { error: 'PostgreSQL refused the connection at postgres:5432.' }) }],
 });
-const app = (status: HealthReport['status'] = 'ok') => buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.resolve(report(status)), auth: devAuth() });
+const app = (status: HealthReport['status'] = 'ok') =>
+  buildApp({ publicDir: GR8R_DIST, pool, blobs: unusedBlobs, health: () => Promise.resolve(report(status)), auth: devAuth() });
 
 test('/healthz answers without asking the database or storage', async () => {
-  const response = await buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.reject(new Error('not called')), auth: devAuth() }).inject('/healthz');
+  const response = await buildApp({
+    publicDir: GR8R_DIST,
+    pool,
+    blobs: unusedBlobs,
+    health: () => Promise.reject(new Error('not called')),
+    auth: devAuth(),
+  }).inject('/healthz');
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), { status: 'ok' });
 });
@@ -50,6 +58,7 @@ test('/api/health writes why a check failed to the server log', async () => {
   const logged = buildApp({
     publicDir: GR8R_DIST,
     pool,
+    blobs: unusedBlobs,
     health: () => Promise.resolve(report('failing')),
     auth: devAuth(),
     logger: { level: 'error', stream: { write: (line: string) => lines.push(line) } },
@@ -89,7 +98,14 @@ test('the policy allows exactly the inline handlers in the built gr8r-studio', (
 });
 
 test('sign-in is limited per caller: behind the ingress a spoofed X-Forwarded-For entry does not change the key', async () => {
-  const azure = buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.resolve(report('ok')), auth: devAuth(), proxyHops: 1 });
+  const azure = buildApp({
+    publicDir: GR8R_DIST,
+    pool,
+    blobs: unusedBlobs,
+    health: () => Promise.resolve(report('ok')),
+    auth: devAuth(),
+    proxyHops: 1,
+  });
   // The ingress appends the address it saw; anything to the left of it came from the caller.
   const signIn = (spoofed: string, caller: string) =>
     azure.inject({ url: '/auth/dev-login?email=viewer@example.test', remoteAddress: '100.100.0.1', headers: { 'x-forwarded-for': `${spoofed}, ${caller}` } });

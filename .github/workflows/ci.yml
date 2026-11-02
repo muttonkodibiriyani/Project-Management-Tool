@@ -66,7 +66,22 @@ jobs:
         working-directory: server
         env:
           TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
+          TEST_BLOB_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=launchtracker;AccountKey=c3ludGhldGljLWxhdW5jaC10cmFja2VyLXRlc3Qta2V5LTEyMzQ1Ng==;BlobEndpoint=http://127.0.0.1:10000/launchtracker; # gitleaks:allow -- synthetic Azurite-only key
         run: |
+          # The SDK can lead the emulator's service-version table. This test exercises Blob I/O and
+          # rollback compensation, so keep the emulator pinned and consciously relax only its version gate.
+          synthetic_azurite_accounts='launchtracker:c3ludGhldGljLWxhdW5jaC10cmFja2VyLXRlc3Qta2V5LTEyMzQ1Ng==' # gitleaks:allow -- synthetic Azurite-only key
+          docker run --detach --rm --name launch-tracker-ci-azurite \
+            --publish 127.0.0.1:10000:10000 \
+            --env "AZURITE_ACCOUNTS=$synthetic_azurite_accounts" \
+            mcr.microsoft.com/azure-storage/azurite:3.37.0@sha256:830430c1da1a2d537e08f3e6764dd1f5ae00cf0346bcaf625b968ec3f0971fd5 \
+            azurite-blob --blobHost 0.0.0.0 --inMemoryPersistence --skipApiVersionCheck
+          trap 'docker stop launch-tracker-ci-azurite >/dev/null' EXIT
+          for _ in {1..30}; do
+            if curl --silent --output /dev/null http://127.0.0.1:10000/; then break; fi
+            sleep 1
+          done
+          curl --silent --output /dev/null http://127.0.0.1:10000/
           npm ci --ignore-scripts --no-audit --no-fund
           npm run lint
           npm test

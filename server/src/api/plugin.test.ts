@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import Fastify, { type LightMyRequestResponse } from 'fastify';
 import pg from 'pg';
 import { APP_ROLES, type AppRole } from '../auth/roles.js';
+import { unusedBlobs } from '../testing/blobs.js';
 import { SESSION_COOKIE } from '../auth/plugin.js';
 import { apiFixture, USERS, WS, type UserName } from '../testing/api.js';
 import { skipWithoutDatabase } from '../testing/database.js';
@@ -131,7 +132,7 @@ test('a route without a valid access list stops the API from starting', async ()
     const app = Fastify();
     await app.register(
       async scope => {
-        await api(scope, { pool });
+        await api(scope, { pool, blobs: unusedBlobs });
         assert.throws(
           () => scope.get('/forgotten', { config: access === undefined ? {} : { access } }, () => ({})),
           /GET \/api\/v1\/forgotten declares no valid config\.access/,

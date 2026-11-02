@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { devAuth } from './testing/sessions.js';
+import { unusedBlobs } from './testing/blobs.js';
 import { buildApp } from './app.js';
 import type { HealthReport } from './health.js';
 import { smoke } from './smoke.js';
@@ -18,7 +19,7 @@ const COMMIT = 'c'.repeat(40);
 const DIGEST = `sha256:${'d'.repeat(64)}`;
 
 async function run(report: HealthReport, options: { expectDigest?: string; expectCommit?: string } = {}) {
-  const app = buildApp({ publicDir: GR8R_DIST, pool, health: () => Promise.resolve(report), auth: devAuth() });
+  const app = buildApp({ publicDir: GR8R_DIST, pool, blobs: unusedBlobs, health: () => Promise.resolve(report), auth: devAuth() });
   await app.listen({ host: '127.0.0.1', port: 0 });
   const lines: string[] = [];
   try {

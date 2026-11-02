@@ -7,6 +7,7 @@ import { postgresSessions } from './auth/sessions.js';
 import { ConfigError, loadConfig, type Config } from './config.js';
 import { createContainer, createPool, databaseCheck, storageCheck } from './dependencies.js';
 import { expireIdempotencyKeys } from './api/rows.js';
+import { DeferredCleanupBatchError, retryDeferredCleanups } from './db/tx.js';
 import { healthReporter } from './health.js';
 import { managedIdentity } from './managed-identity.js';
 
@@ -29,7 +30,8 @@ if (!existsSync(join(config.publicDir, 'index.html'))) {
 const pool = createPool(config.database, error => {
   app.log.warn({ err: error }, 'an idle PostgreSQL connection closed; the next query reconnects');
 });
-const health = healthReporter([databaseCheck(pool, config.database), storageCheck(createContainer(config.storage), config.storage)], {
+const blobs = createContainer(config.storage);
+const health = healthReporter([databaseCheck(pool, config.database), storageCheck(blobs, config.storage)], {
   commit: config.commit,
   imageDigest: config.imageDigest,
 });
@@ -50,7 +52,7 @@ const auth: AuthOptions =
         }),
       }
     : { mode: 'dev', sessions, signingKey: authConfig.signingKey };
-const app = buildApp({ publicDir: config.publicDir, health, pool, auth, logger: true, proxyHops: config.proxyHops });
+const app = buildApp({ publicDir: config.publicDir, health, pool, blobs, auth, logger: true, proxyHops: config.proxyHops });
 
 const HOUR_MS = 3_600_000;
 const expireKeys = () => {
@@ -58,8 +60,45 @@ const expireKeys = () => {
     app.log.warn({ err: error }, 'old idempotency keys could not be removed; the next hourly run tries again');
   });
 };
+const cleanBlobs = () => {
+  retryDeferredCleanups(pool, 'blob', async item => {
+    const { rows } = await pool.query<{ found: boolean }>('select true as found from file where workspace_id = $1 and blob_name = $2 and deleted_at is null', [
+      item.workspaceId,
+      item.key,
+    ]);
+    if (!rows[0]?.found) await blobs.getBlockBlobClient(item.key).deleteIfExists({ deleteSnapshots: 'include' });
+  })
+    .then(report => {
+      const telemetry = {
+        completed: report.completed,
+        queueDepth: report.queueDepth,
+        oldestAgeSeconds: Math.round(report.oldestAgeSeconds),
+        maxAttempts: report.maxAttempts,
+      };
+      app.log.info(telemetry, 'Blob cleanup reconciliation finished');
+      // Five failed attempts or 24 hours in the queue is the operator-escalation threshold.
+      // Rows keep retrying hourly: private data is not abandoned in an automatic dead letter.
+      if (report.needsEscalation) app.log.error(telemetry, 'Blob cleanup queue needs operator attention');
+    })
+    .catch((error: unknown) => {
+      const report = error instanceof DeferredCleanupBatchError ? error.report : undefined;
+      const telemetry = {
+        err: error,
+        completed: report?.completed,
+        queueDepth: report?.queueDepth,
+        oldestAgeSeconds: report ? Math.round(report.oldestAgeSeconds) : undefined,
+        maxAttempts: report?.maxAttempts,
+        failures: report?.failures,
+      };
+      const message = 'queued Blob cleanup could not finish; the next hourly run tries again';
+      if (report?.needsEscalation) app.log.error(telemetry, message);
+      else app.log.warn(telemetry, message);
+    });
+};
 expireKeys();
+cleanBlobs();
 setInterval(expireKeys, HOUR_MS).unref();
+setInterval(cleanBlobs, HOUR_MS).unref();
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {

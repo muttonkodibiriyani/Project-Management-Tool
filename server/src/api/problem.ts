@@ -20,6 +20,7 @@ const TITLES: Record<string, string> = {
   managed_by_entra: 'This membership comes from Microsoft Entra',
   cursor_expired: 'The offline copy is too old; reload it',
   payload_too_large: 'The request is too large',
+  unsupported_media_type: 'The file type is not supported',
   validation_failed: 'Some fields are not valid',
   idempotency_key_reused: 'This Idempotency-Key was used for a different request',
   version_required: 'Send If-Match with the version you edited',
