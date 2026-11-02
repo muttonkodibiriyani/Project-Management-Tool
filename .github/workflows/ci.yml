@@ -85,7 +85,9 @@ jobs:
         with:
           persist-credentials: false
       - name: ShellCheck
-        run: docker run --rm -v "$PWD:/mnt:ro" koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d /mnt/local/check.sh /mnt/e2e/run.sh /mnt/azure/deploy.sh
+        run: docker run --rm -v "$PWD:/mnt:ro" koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d /mnt/local/check.sh /mnt/e2e/run.sh /mnt/azure/deploy.sh /mnt/azure/deploy.test.sh
+      - name: Azure deploy controls unit tests
+        run: bash azure/deploy.test.sh
       - name: check.sh and e2e/run.sh parse in bash 3.2, the version on a Mac
         run: |
           for script in local/check.sh e2e/run.sh; do
