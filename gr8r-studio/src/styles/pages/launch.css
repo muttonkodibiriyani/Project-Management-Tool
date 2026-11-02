@@ -109,6 +109,12 @@
   gap: var(--s-4);
   align-items: start;
 }
+.launch-dashboard > .stack,
+.launch-dashboard .panel,
+.launch-overview .tbl-wrap {
+  min-width: 0;
+  max-width: 100%;
+}
 .launch-table {
   width: 100%;
 }
@@ -234,7 +240,7 @@
   .launch-dashboard {
     grid-template-columns: 1fr;
   }
-  .launch-stats {
+  .stats.launch-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .launch-page .ph {
@@ -246,8 +252,82 @@
   }
 }
 @media (max-width: 600px) {
-  .launch-stats {
+  .stats.launch-stats {
     grid-template-columns: 1fr;
+  }
+  .launch-stats .stat + .stat {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+  .launch-page-table,
+  .launch-followups .tbl-wrap {
+    overflow: visible;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  .launch-page-table .tbl,
+  .launch-followups .tbl {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  .launch-page-table thead,
+  .launch-followups thead {
+    display: none;
+  }
+  .launch-page-table tbody,
+  .launch-followups tbody {
+    display: grid;
+    gap: var(--s-3);
+  }
+  .launch-page-table tr,
+  .launch-followups tr {
+    display: grid;
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+  }
+  .launch-page-table .tbl td,
+  .launch-followups .tbl td {
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    height: auto;
+    display: grid;
+    grid-template-columns: minmax(92px, 0.42fr) minmax(0, 1fr);
+    align-items: center;
+    gap: var(--s-2);
+    padding: 8px 10px;
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    border-right: 0;
+    background: var(--surface);
+  }
+  .launch-page-table .tbl td::before,
+  .launch-followups .tbl td::before {
+    content: attr(data-label);
+    align-self: start;
+    color: var(--text-3);
+    font-size: var(--fs-xs);
+    font-weight: 500;
+  }
+  .launch-page-table .tbl td:last-child,
+  .launch-followups .tbl td:last-child {
+    border-bottom: 0;
+  }
+  .launch-page-table .sticky,
+  .launch-page-table tr:hover .sticky,
+  .launch-followups .sticky,
+  .launch-followups tr:hover .sticky {
+    background: var(--surface);
+  }
+  .launch-page-table .capc {
+    min-width: 0;
   }
   .launch-risk {
     align-items: flex-start;

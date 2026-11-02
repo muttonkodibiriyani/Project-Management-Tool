@@ -35,3 +35,51 @@ export function buildFollowUp({ line, gate = null, owner, ownerName, due, note =
     notif: { type: 'assign', to: owner, by, text: 'asked you to follow up', snippet: `${about} · ${line.key} · due ${due}`, due, at: now, read: false },
   };
 }
+
+/**
+ * Applies the pure follow-up result to the in-memory model using canonical API
+ * fields and the legacy demo aliases. The server endpoint persists the same
+ * task/comment/notification transaction in production.
+ */
+export function persistFollowUp({ data, line, gate, owner, ownerName, due, note, by, now, today, ids, key, storeId = null, order = 0 }) {
+  const made = buildFollowUp({ line, gate, owner, ownerName, due, note, by, now, today });
+  const task = {
+    ...made.task,
+    id: ids.task,
+    key,
+    kind: 'follow_up',
+    projectId: line.project,
+    assigneeId: owner,
+    dueDate: due,
+    followsUpId: line.id,
+    followsUpGate: gate?.key || null,
+    followsUpStoreId: storeId,
+    followUpOf: { task: line.id, gate: gate?.key || null, storeId },
+    priority: 'medium',
+    labels: [],
+    subtasks: [],
+    attachments: [],
+    deps: [],
+    order,
+  };
+  const comment = {
+    ...made.comment,
+    id: ids.comment,
+    taskId: line.id,
+    authorId: by,
+    body: made.comment.text,
+  };
+  const notification = {
+    ...made.notif,
+    id: ids.notification,
+    task: task.id,
+    taskId: task.id,
+    userId: owner,
+  };
+  data.tasks.push(task);
+  data.comments.push(comment);
+  const inbox = data.notifications || data.notifs;
+  if (!Array.isArray(inbox)) throw new Error('The owner inbox is not loaded. Reload the workspace and try again.');
+  inbox.unshift(notification);
+  return { task, comment, notification };
+}

@@ -30,6 +30,10 @@ export function launchProject(data, id) {
   return (data.projects || []).find(project => same(project.id, id)) || null;
 }
 
+export function firstLaunchProject(data) {
+  return (data.projects || []).find(isLaunch) || null;
+}
+
 export function templateFor(data, project) {
   return (data.templates || []).find(template => same(template.id, project?.templateId)) || null;
 }
@@ -43,6 +47,40 @@ export function launchStores(data, project) {
       return store ? { ...store, slot: link.slot } : null;
     })
     .filter(Boolean);
+}
+
+/** Workspace store rows plus the launch projects that use each one. */
+export function storesDirectorySource(data) {
+  const launches = (data.projects || []).filter(isLaunch);
+  return (data.stores || []).map(store => ({
+    ...store,
+    launches: launches.filter(project => project.stores?.some(link => same(link.storeId, store.id))),
+  }));
+}
+
+/** Both the canonical API member and the legacy demo member become this one shape. */
+export function launchMember(data, id) {
+  const member = (data.members || []).find(item => same(first(item.user?.id, item.id), id));
+  if (!member) return null;
+  const user = member.user || member;
+  return {
+    id: first(user.id, member.id),
+    name: first(user.name, member.name, 'Unknown member'),
+    email: first(user.email, member.email, ''),
+    colour: first(user.colour, user.c, member.colour, member.c, 'var(--gray)'),
+    teams: Array.isArray(member.teams) ? member.teams.map(String) : member.team ? [String(member.team)] : [],
+    raw: member,
+  };
+}
+
+/** ownerTeamId is a team id; canonical members hold that team's key. */
+export function ownerForGate(data, gate, line, fallback = null) {
+  const team = (data.teams || []).find(item => same(item.id, gate?.ownerTeamId));
+  const teamKeys = [team?.key, team?.id, gate?.ownerTeamId].filter(Boolean).map(String);
+  const member = (data.members || [])
+    .map(item => launchMember(data, first(item.user?.id, item.id)))
+    .find(item => item?.teams.some(key => teamKeys.includes(key)));
+  return member?.id || line?.assignee || fallback;
 }
 
 export function fieldsFor(data, project, scope = null) {
@@ -265,12 +303,17 @@ export function bcMark(data, project, line) {
   return `<span class="bc bc-${esc(String(key).toLowerCase())}" style="--c:${esc(option?.colour || 'var(--gray)')}" data-tip="${esc(option?.label || key)}"><i></i>${esc(option?.label || key)}</span>`;
 }
 
-export function directorySource(data) {
+/**
+ * Joins public bootstrap rows to an explicit authorized GET /w/:ws/directory
+ * response. Contacts and margins are never inferred from bootstrap.
+ */
+export function directorySource(data, authorized = null) {
   const lines = (data.tasks || []).filter(task => task.kind === 'line' && !task.archived);
   const brandMarkets = data.brandMarkets || [];
   const vendors = new Map((data.vendors || []).map(vendor => [String(vendor.id), vendor]));
-  const margins = new Map((data.brandMarketMargins || []).map(row => [String(row.brandMarketId), row]));
-  const contacts = data.contacts || [];
+  const permissions = { margins: !!authorized?.permissions?.margins, contacts: !!authorized?.permissions?.contacts };
+  const margins = new Map((permissions.margins ? authorized?.brandMarketMargins || [] : []).map(row => [String(row.brandMarketId), row]));
+  const contacts = permissions.contacts ? authorized?.contacts || [] : [];
   const brands = (data.brands || []).map(brand => ({
     ...brand,
     lineCount: lines.filter(line => same(line.brandId, brand.id)).length,
@@ -287,5 +330,6 @@ export function directorySource(data) {
       contacts: contacts.filter(contact => same(contact.vendorId, vendor.id)),
     })),
     contacts,
+    permissions,
   };
 }

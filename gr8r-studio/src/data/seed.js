@@ -101,6 +101,8 @@ export function seed() {
       tz: 'Madrid',
     },
   ];
+  const launchTeams = [['brand', 'commercial'], ['comms'], ['supply'], ['vm'], ['marketing'], ['registration'], ['brand'], []];
+  members.forEach((member, index) => (member.teams = launchTeams[index]));
   const projects = [
     {
       id: 'p1',

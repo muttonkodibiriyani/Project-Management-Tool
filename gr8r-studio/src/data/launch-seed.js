@@ -6,14 +6,14 @@ const list = (id, name) => ({ id, key: id.replace('list-', ''), name });
 
 export function addSyntheticLaunch({ projects, tasks, dOff, minsAgo }) {
   const teams = [
-    ...TEAMS_SEED.map(team => ({ ...team })),
-    ['team-brand', 'Brand team', 'tag'],
-    ['team-comms', 'Comms', 'messages-square'],
-    ['team-commercial', 'Commercial', 'handshake'],
-    ['team-registration', 'Registration', 'badge-check'],
-    ['team-supply', 'Supply', 'truck'],
-    ['team-vm', 'VM / space', 'layout-grid'],
-  ].map(team => (Array.isArray(team) ? { id: team[0], name: team[1], icon: team[2], c: '#5A67D8', desc: '' } : team));
+    ...TEAMS_SEED.map(team => ({ ...team, key: team.key || team.id })),
+    ['team-brand', 'brand', 'Brand team', 'tag'],
+    ['team-comms', 'comms', 'Comms', 'messages-square'],
+    ['team-commercial', 'commercial', 'Commercial', 'handshake'],
+    ['team-registration', 'registration', 'Registration', 'badge-check'],
+    ['team-supply', 'supply', 'Supply', 'truck'],
+    ['team-vm', 'vm', 'VM / space', 'layout-grid'],
+  ].map(team => (Array.isArray(team) ? { id: team[0], key: team[1], name: team[2], icon: team[3], c: '#5A67D8', desc: '' } : team));
 
   const stores = [
     {
@@ -239,25 +239,6 @@ export function addSyntheticLaunch({ projects, tasks, dOff, minsAgo }) {
       icf: i % 6 === 0 ? 'pending' : 'received',
     },
   }));
-  const brandMarketMargins = brandMarkets.map((row, i) => ({
-    brandMarketId: row.id,
-    margin: 0.35 + (i % 8) * 0.01,
-    extraMargin: i % 4 === 0 ? 0.02 : null,
-    terms: i % 4 === 0 ? 'Synthetic logistics allowance' : '',
-  }));
-  const contacts = vendors.flatMap((vendor, i) => [
-    {
-      id: `contact-${i + 1}`,
-      vendorId: vendor.id,
-      marketCode: 'TST',
-      name: `Contact ${String.fromCharCode(65 + i)}`,
-      role: 'Account manager',
-      emails: [`contact${i + 1}@example.test`],
-      phones: [],
-      asWritten: `Contact ${String.fromCharCode(65 + i)}`,
-    },
-  ]);
-
   const categories = ['Skincare', 'Make-up', 'Hair', 'Wellness'];
   const zones = ['Prestige', 'Beauty', 'Korean beauty', 'Impulse'];
   const codes = ['yellow', 'purple', 'blue', 'green', 'tbc'];
@@ -394,5 +375,28 @@ export function addSyntheticLaunch({ projects, tasks, dOff, minsAgo }) {
     ),
   );
 
-  return { teams, stores, templates, lists, options, fields, capacity, brands, brandMarkets, brandMarketMargins, vendors, contacts, lineStores };
+  return { teams, stores, templates, lists, options, fields, capacity, brands, brandMarkets, vendors, lineStores };
+}
+
+/** Synthetic response shaped like the authorized directory endpoint, never like /bootstrap. */
+export function syntheticLaunchDirectory() {
+  return {
+    permissions: { margins: true, contacts: true },
+    brandMarketMargins: Array.from({ length: 64 }, (_, i) => ({
+      brandMarketId: `brand-market-${i + 1}`,
+      margin: 0.35 + (i % 8) * 0.01,
+      extraMargin: i % 4 === 0 ? 0.02 : null,
+      terms: i % 4 === 0 ? 'Synthetic logistics allowance' : '',
+    })),
+    contacts: Array.from({ length: 8 }, (_, i) => ({
+      id: `contact-${i + 1}`,
+      vendorId: `vendor-${i + 1}`,
+      marketCode: 'TST',
+      name: `Contact ${String.fromCharCode(65 + i)}`,
+      role: 'Account manager',
+      emails: [`contact${i + 1}@example.test`],
+      phones: [],
+      asWritten: `Contact ${String.fromCharCode(65 + i)}`,
+    })),
+  };
 }

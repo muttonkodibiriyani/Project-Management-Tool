@@ -2,6 +2,7 @@
 import { TODAY, diffD, iso, parse, uid } from './utils.js';
 import { PCOLORS, TEAMS_SEED } from './constants.js';
 import { seed } from '../data/seed.js';
+import { syntheticLaunchDirectory } from '../data/launch-seed.js';
 
 export const STORE_KEY = 'gr8r.v2';
 export const DEFAULT_PREFS = {
@@ -34,6 +35,8 @@ export function load() {
 export const saved = load();
 export const S = {
   data: saved?.data || seed(),
+  // Restricted endpoint responses live only in memory and are never stored with bootstrap.
+  authorized: { launchDirectory: syntheticLaunchDirectory() },
   prefs: Object.assign({}, DEFAULT_PREFS, saved?.prefs || {}),
   views: saved?.views || {},
   ui: {
