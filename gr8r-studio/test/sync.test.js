@@ -385,6 +385,143 @@ test('partial outbox success is checkpointed and does not replay an accepted edi
   assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
 });
 
+test('a resumed edit never invents a delete for a concurrent remote create', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  let taskPatches = 0;
+  let projectDeletes = 0;
+  let failTask = true;
+  let visible;
+  const statuses = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/tasks/task-1' && options.method === 'PATCH') {
+      taskPatches += 1;
+      if (failTask) throw new Error('The local task edit lost its connection.');
+      serverBoot.tasks[0] = { ...serverBoot.tasks[0], ...options.body, version: 2 };
+      return { data: structuredClone(serverBoot.tasks[0]) };
+    }
+    if (path === '/api/v1/w/synthetic/projects/concurrent-project' && options.method === 'DELETE') {
+      projectDeletes += 1;
+      serverBoot.projects = serverBoot.projects.filter(project => project.id !== 'concurrent-project');
+      return { data: null };
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.tasks[0].title = 'Queued local edit';
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  first.stop();
+
+  serverBoot.projects.push({
+    id: 'concurrent-project',
+    version: 1,
+    key: 'OTHER',
+    name: 'Created by another user',
+    kind: 'general',
+    colour: '#5A67D8',
+    memberIds: ['user-1'],
+  });
+  failTask = false;
+  const second = createSync(options);
+  await second.start();
+  second.stop();
+
+  assert.equal(taskPatches, 2);
+  assert.equal(projectDeletes, 0, 'the immutable queued plan contains no delete for the unseen concurrent row');
+  assert.ok(serverBoot.projects.some(project => project.id === 'concurrent-project'));
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
+test('a resumed edit never resurrects a concurrently deleted remote row', async () => {
+  const storage = new MemoryStorage();
+  let serverBoot = structuredClone(BOOT);
+  serverBoot.projects.push({
+    id: 'removed-project',
+    version: 1,
+    key: 'OLD',
+    name: 'Removed by another user',
+    kind: 'general',
+    colour: '#5A67D8',
+    memberIds: ['user-1'],
+  });
+  let taskPatches = 0;
+  let projectCreates = 0;
+  let failTask = true;
+  let visible;
+  const statuses = [];
+  const request = async (path, options = {}) => {
+    if (path === '/api/v1/me') return { data: structuredClone(PROFILE) };
+    if (path === '/api/v1/w/synthetic/bootstrap') return { data: structuredClone(serverBoot) };
+    if (path === '/api/v1/w/synthetic/directory') return { data: { permissions: { margins: false, contacts: false } } };
+    if (path === '/api/v1/me/sessions') return { data: { items: [] } };
+    if (path === '/api/v1/w/synthetic/tasks/task-1' && options.method === 'PATCH') {
+      taskPatches += 1;
+      if (failTask) throw new Error('The local task edit lost its connection.');
+      serverBoot.tasks[0] = { ...serverBoot.tasks[0], ...options.body, version: 2 };
+      return { data: structuredClone(serverBoot.tasks[0]) };
+    }
+    if (path === '/api/v1/w/synthetic/projects' && options.method === 'POST') {
+      projectCreates += 1;
+      return { data: { id: 'resurrected-project', version: 1, ...options.body } };
+    }
+    throw new Error(`unexpected ${options.method || 'GET'} ${path}`);
+  };
+  const options = {
+    request,
+    workspacePath: (workspace, path) => `/api/v1/w/${workspace}${path}`,
+    storage,
+    onData: data => {
+      visible = data;
+    },
+    onStatus: status => statuses.push(status),
+    setTimer: () => 1,
+    clearTimer: () => {},
+    events: {},
+  };
+  const first = createSync(options);
+  await first.start();
+  const next = structuredClone(visible);
+  next.tasks[0].title = 'Queued local edit';
+  first.queueSnapshot({ data: next, prefs: PROFILE.prefs });
+  await waitFor(() => assert.equal(statuses.at(-1)?.offline, true));
+  first.stop();
+
+  serverBoot.projects = serverBoot.projects.filter(project => project.id !== 'removed-project');
+  failTask = false;
+  const second = createSync(options);
+  await second.start();
+  second.stop();
+
+  assert.equal(taskPatches, 2);
+  assert.equal(projectCreates, 0, 'the immutable queued plan contains no create for the concurrently removed row');
+  assert.equal(
+    serverBoot.projects.some(project => project.id === 'removed-project'),
+    false,
+  );
+  const pointer = JSON.parse(storage.getItem('lt.cache.active'));
+  assert.deepEqual(JSON.parse(storage.getItem(pointer.key)).outbox, []);
+});
+
 test('an accepted create keeps its server identity when a later edit resumes after restart', async () => {
   const storage = new MemoryStorage();
   let serverBoot = structuredClone(BOOT);
