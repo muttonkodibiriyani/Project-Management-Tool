@@ -4,6 +4,7 @@
 import { $, $$, TODAY, addD, dOff, esc, fmtDate, iso, parse, uid } from '../core/utils.js';
 import { PR, PSTAT, ST } from '../core/constants.js';
 import { seed } from '../data/seed.js';
+import { signIn, signOut } from '../core/auth-session.js';
 import { D, DEFAULT_PREFS, S, allTasks, canSee, commentsOf, logAct, me, mem, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
 import { fileType, fsize } from '../ui/helpers.js';
 import { effectiveDark } from '../core/theme.js';
@@ -1753,14 +1754,16 @@ A.newWorkspace = () => {
   S.ui.onbData.url = '';
   render();
 };
-A.signOut = () => {
+A.signOut = async () => {
   S.ui.pop = null;
   S.ui.palette = null;
   S.ui.drawer = null;
   S.ui.modals = [];
-  S.ui.auth = 'login';
-  S.ui.errors = {};
-  render();
+  try {
+    await signOut();
+  } catch (error) {
+    if (error?.status !== 401) toast('Could not sign out. Check your connection and try again.', { kind: 'err' });
+  }
 };
 A.shortcuts = () => {
   S.ui.pop = null;
@@ -2057,128 +2060,8 @@ A.changePlan = el => {
 };
 
 /* auth */
-A.auth = el => {
-  S.ui.auth = el.dataset.v;
-  S.ui.errors = {};
-  S.ui.pwNew = '';
-  render();
-  setTimeout(() => $('.auth input')?.focus(), 20);
-};
-A.toggleShowPw = () => {
-  const v = $('#l-pw')?.value;
-  S.ui.showPw = !S.ui.showPw;
-  render();
-  const i = $('#l-pw');
-  if (i) {
-    i.value = v;
-    i.focus();
-  }
-};
+A.signIn = () => signIn();
 export const EMAIL_RE = /^\S+@\S+\.\S+$/;
-export function enterApp(msg) {
-  S.ui.auth = null;
-  S.ui.errors = {};
-  go(S.prefs.home || 'home');
-  toast(msg);
-}
-A.doLogin = () => {
-  const e = (S.ui.errors = {});
-  const em = $('#l-email').value.trim(),
-    pw = $('#l-pw').value;
-  S.ui.af.email = em;
-  if (!em) e.email = 'Enter your email address';
-  else if (!EMAIL_RE.test(em)) e.email = 'Enter a valid email, like name@company.com';
-  if (!pw) e.pw = 'Enter your password';
-  if (Object.keys(e).length) {
-    render();
-    (e.email ? $('#l-email') : $('#l-pw'))?.focus();
-    if (!e.email) $('#l-pw').value = pw;
-    return;
-  }
-  loadingBtn('login-btn', 750, () => enterApp(`Signed in as ${em}`));
-};
-A.socialAuth = el => {
-  el.classList.add('is-loading');
-  setTimeout(() => enterApp(`Signed in with ${el.dataset.v}`), 800);
-};
-A.doSignup = () => {
-  const e = (S.ui.errors = {});
-  const nm = $('#s-name').value.trim(),
-    em = $('#s-email').value.trim(),
-    pw = $('#s-pw').value;
-  S.ui.af.name = nm;
-  S.ui.af.email = em;
-  if (!nm) e.name = 'Enter your name';
-  if (!EMAIL_RE.test(em)) e.email = 'Enter a valid work email';
-  if (pw.length < 10 || !/[0-9\W]/.test(pw)) e.pw = 'Use at least 10 characters, including a number or symbol';
-  if (Object.keys(e).length) {
-    render();
-    $('#s-email').value = em;
-    return;
-  }
-  loadingBtn('signup-btn', 800, () => {
-    S.ui.auth = 'verify';
-    startResend();
-    render();
-  });
-};
-export function startResend() {
-  S.ui.resendT = 30;
-  clearInterval(startResend._i);
-  startResend._i = setInterval(() => {
-    S.ui.resendT--;
-    const el = $('#resend-t');
-    if (el) el.textContent = S.ui.resendT;
-    if (S.ui.resendT <= 0) {
-      clearInterval(startResend._i);
-      if (S.ui.auth === 'verify') render();
-    }
-  }, 1000);
-}
-A.resend = el => {
-  if (el.dataset.v === 'verify') {
-    startResend();
-    render();
-    toast(`Verification email sent to ${S.ui.af.email}`);
-  } else toast(`Reset link sent to ${S.ui.af.email}`);
-};
-A.verified = () => {
-  S.ui.auth = 'onboarding';
-  S.ui.onb = 0;
-  S.ui.onbData.ws = '';
-  S.ui.onbData.url = '';
-  render();
-};
-A.doForgot = () => {
-  const em = $('#f-email').value.trim();
-  S.ui.af.email = em;
-  S.ui.errors = {};
-  if (!EMAIL_RE.test(em)) {
-    S.ui.errors.email = 'Enter the email you use to sign in';
-    render();
-    return;
-  }
-  loadingBtn('forgot-btn', 700, () => {
-    S.ui.auth = 'forgot-sent';
-    render();
-  });
-};
-A.doReset = () => {
-  const a = $('#r-pw').value,
-    b = $('#r-pw2').value;
-  const e = (S.ui.errors = {});
-  if (a.length < 10 || !/[0-9\W]/.test(a)) e.pw = 'Use at least 10 characters, including a number or symbol';
-  if (a !== b) e.pw2 = "Passwords don't match";
-  if (Object.keys(e).length) {
-    render();
-    return;
-  }
-  loadingBtn('reset-btn', 700, () => {
-    S.ui.auth = 'reset-done';
-    S.ui.pwNew = '';
-    render();
-  });
-};
 
 /* onboarding */
 A.onbSet = el => {
