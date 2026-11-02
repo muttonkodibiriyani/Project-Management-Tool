@@ -147,7 +147,7 @@ export async function apiFixture(t: TestContext): Promise<Fixture> {
   });
   const routeMap = new Map<string, RegisteredRoute>();
   app.addHook('onRoute', route => {
-    if (route.url.startsWith('/api/v1/')) {
+    if (route.url === '/api/v1' || route.url.startsWith('/api/v1/')) {
       for (const method of [route.method].flat()) {
         if (method === 'HEAD') continue;
         const key = `${method} ${route.url}`;
